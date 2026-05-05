@@ -1,0 +1,162 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomRole {
+  admin
+  viewer
+}
+
+enum ContentType {
+  pdf
+  image
+}
+
+model User {
+  id                    String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                 String                   @unique @db.VarChar(320)
+  passwordHash          String
+  displayName           String?                  @db.VarChar(120)
+  avatarUrl             String?
+  emailVerified         Boolean                  @default(false)
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+
+  // Relations
+  rooms                 Room[]
+  roomMembers           RoomMember[]
+  contentItems          ContentItem[]
+  inviteLinks           InviteLink[]
+  passwordResetTokens    PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+
+  @@map("users")
+}
+
+model Room {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug              String       @unique @db.VarChar(8)
+  name              String       @db.VarChar(120)
+  description       String?      @db.VarChar(500)
+  passwordHash      String?
+  createdBy         String       @db.Uuid
+  isDeleted         Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // Relations
+  creator           User      @relation(fields: [createdBy], references: [id])
+  members           RoomMember[]
+  contentItems      ContentItem[]
+  inviteLinks       InviteLink[]
+
+  @@index([createdBy])
+  @@index([slug])
+  @@index([createdBy, isDeleted])
+  @@map("rooms")
+}
+
+model RoomMember {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId            String    @db.Uuid
+  userId            String    @db.Uuid
+  role              RoomRole  @default(viewer)
+  joinedAt          DateTime  @default(now())
+
+  // Relations
+  room              Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([roomId, role])
+  @@index([userId])
+  @@index([roomId])
+  @@map("room_members")
+}
+
+model InviteLink {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId            String    @db.Uuid
+  token             String    @unique @db.VarChar(128)
+  role              RoomRole  @default(viewer)
+  createdBy         String    @db.Uuid
+  expiresAt         DateTime?
+  isSingleUse       Boolean   @default(false)
+  usedAt            DateTime?
+  isRevoked         Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+
+  // Relations
+  room              Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  creator           User      @relation(fields: [createdBy], references: [id])
+
+  @@index([roomId])
+  @@index([token])
+  @@index([roomId, isRevoked, expiresAt])
+  @@map("invite_links")
+}
+
+model ContentItem {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId            String       @db.Uuid
+  createdBy         String       @db.Uuid
+  type              ContentType
+  title             String       @db.VarChar(255)
+  storageKey        String       @unique @db.VarChar(512)
+  fileSizeBytes     Int
+  mimeType          String?      @db.VarChar(255)
+  metadata          Json?        // { width, height } for images, etc.
+  isDeleted         Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // Relations
+  room              Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  creator           User      @relation(fields: [createdBy], references: [id])
+
+  @@index([roomId])
+  @@index([createdBy])
+  @@index([type])
+  @@index([roomId, isDeleted, createdAt])
+  @@map("content_items")
+}
+
+model PasswordResetToken {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String    @db.Uuid
+  token             String    @unique @db.VarChar(128)
+  expiresAt         DateTime
+  usedAt            DateTime?
+  createdAt         DateTime  @default(now())
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([userId, usedAt])
+  @@map("password_reset_tokens")
+}
+
+model EmailVerificationToken {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String    @db.Uuid
+  token             String    @unique @db.VarChar(128)
+  expiresAt         DateTime
+  createdAt         DateTime  @default(now())
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, expiresAt])
+  @@map("email_verification_tokens")
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@nexus/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --loader tsx ./src/server.ts",
+    "build": "tsc --project tsconfig.json",
+    "start": "node dist/server.js",
+    "lint": "eslint src --ext .ts",
+    "test": "echo \"No tests yet\"",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.5.2",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.25.1",
+    "pino": "^8.16.2",
+    "pino-pretty": "^10.2.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.2.2",
+    "tsx": "^4.6.2",
+    "prisma": "^5.5.2"
+  }
+}

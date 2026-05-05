@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@nexus/types": ["packages/types/src"],
+      "@nexus/types/*": ["packages/types/src/*"],
+      "@nexus/api-client": ["packages/api-client/src"],
+      "@nexus/api-client/*": ["packages/api-client/src/*"],
+      "@nexus/ui": ["packages/ui/src"],
+      "@nexus/ui/*": ["packages/ui/src/*"]
+    }
+  },
+  "include": ["apps", "packages"],
+  "exclude": ["node_modules", "dist", ".turbo"]
+}

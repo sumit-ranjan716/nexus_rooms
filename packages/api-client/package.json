@@ -1,0 +1,14 @@
+{
+  "name": "@nexus/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@nexus/types": "*",
+    "zod": "^3.23.8"
+  },
+  "scripts": {
+    "lint": "eslint src --ext .ts"
+  }
+}
