@@ -1,15 +1,24 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import AuthBootstrap from './components/AuthBootstrap';
 import Layout from './components/Layout';
+import ProtectedRoute from './components/ProtectedRoute';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
+import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
 
 function App(): JSX.Element {
   return (
     <Router>
+      <AuthBootstrap />
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
+        <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<Layout />}>
+            <Route path="/" element={<Dashboard />} />
+          </Route>
         </Route>
       </Routes>
     </Router>

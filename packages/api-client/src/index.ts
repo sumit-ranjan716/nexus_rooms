@@ -15,9 +15,18 @@ const API_URL = runtimeEnvironment.VITE_API_URL;
 
 class ApiClient {
   private baseUrl: string;
+  private accessToken: string | null = null;
 
   constructor(baseUrl: string = API_URL) {
     this.baseUrl = baseUrl;
+  }
+
+  setAccessToken(token: string | null): void {
+    this.accessToken = token;
+  }
+
+  clearAccessToken(): void {
+    this.accessToken = null;
   }
 
   private async request<T>(
@@ -29,8 +38,10 @@ class ApiClient {
     const response = await fetch(url, {
       headers: {
         'Content-Type': 'application/json',
+        ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
         ...options.headers,
       },
+      credentials: 'include',
       ...options,
     });
 
@@ -97,21 +108,55 @@ class ApiClient {
     email: string,
     password: string,
     displayName: string
-  ): Promise<Types.LoginResponse> {
+  ): Promise<Types.SignupResponse> {
     const payload = requestSchemas.signup.parse({ email, password, displayName });
 
     return this.request('/api/v1/auth/signup', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }, responseSchemas.auth).then((response) => response.data);
+    }, responseSchemas.signup).then((response) => response.data);
   }
 
   async logout(): Promise<void> {
-    await this.request('/api/v1/auth/logout', { method: 'POST' }, responseSchemas.empty);
+    await this.request('/api/v1/auth/logout', { method: 'POST' }, responseSchemas.authMessage);
+    this.clearAccessToken();
   }
 
   async refreshToken(): Promise<Types.LoginResponse> {
     return this.request('/api/v1/auth/refresh', { method: 'POST' }, responseSchemas.auth).then(
+      (response) => response.data
+    );
+  }
+
+  async verifyEmail(token: string): Promise<Types.AuthMessageResponse> {
+    const payload = requestSchemas.verifyEmail.parse({ token });
+
+    return this.request('/api/v1/auth/verify-email', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.authMessage).then((response) => response.data);
+  }
+
+  async forgotPassword(email: string): Promise<Types.AuthMessageResponse> {
+    const payload = requestSchemas.forgotPassword.parse({ email });
+
+    return this.request('/api/v1/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.authMessage).then((response) => response.data);
+  }
+
+  async resetPassword(token: string, password: string): Promise<Types.AuthMessageResponse> {
+    const payload = requestSchemas.resetPassword.parse({ token, password });
+
+    return this.request('/api/v1/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.authMessage).then((response) => response.data);
+  }
+
+  async getCurrentUser(): Promise<Types.CurrentUserResponse> {
+    return this.request('/api/v1/auth/me', { method: 'GET' }, responseSchemas.currentUser).then(
       (response) => response.data
     );
   }

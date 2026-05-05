@@ -12,12 +12,16 @@ datasource db {
 
 enum RoomRole {
   admin
+  editor
   viewer
 }
 
 enum ContentType {
   pdf
   image
+  document
+  link
+  text
 }
 
 model User {
@@ -37,6 +41,7 @@ model User {
   inviteLinks           InviteLink[]
   passwordResetTokens    PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
+  refreshSessions       RefreshSession[]
 
   @@map("users")
 }
@@ -159,4 +164,24 @@ model EmailVerificationToken {
   @@index([userId])
   @@index([userId, expiresAt])
   @@map("email_verification_tokens")
+}
+
+model RefreshSession {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String    @db.Uuid
+  familyId            String    @db.Uuid
+  tokenHash           String    @unique @db.VarChar(128)
+  rotatedFromSessionId String?  @db.Uuid
+  revokedAt           DateTime?
+  expiresAt           DateTime
+  lastUsedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_sessions")
 }

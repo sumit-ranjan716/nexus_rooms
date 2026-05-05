@@ -40,6 +40,7 @@ const userSchema = z.object({
   avatarUrl: z.string().nullable(),
   emailVerified: z.boolean(),
   createdAt: z.string(),
+  updatedAt: z.string(),
 });
 
 const roomSchema = z.object({
@@ -58,7 +59,7 @@ const roomMemberSchema = z.object({
   id: z.string(),
   roomId: z.string(),
   userId: z.string(),
-  role: z.enum(['admin', 'viewer']),
+  role: z.enum(['admin', 'editor', 'viewer']),
   joinedAt: z.string(),
   user: z
     .object({
@@ -72,7 +73,7 @@ const inviteLinkSchema = z.object({
   id: z.string(),
   token: z.string(),
   url: z.string().url(),
-  role: z.enum(['admin', 'viewer']),
+  role: z.enum(['admin', 'editor', 'viewer']),
   expiresAt: z.string().nullable(),
   isSingleUse: z.boolean(),
   isRevoked: z.boolean(),
@@ -83,7 +84,7 @@ const inviteLinkSchema = z.object({
 const contentItemSchema = z.object({
   id: z.string(),
   roomId: z.string(),
-  type: z.enum(['pdf', 'image']),
+  type: z.enum(['pdf', 'image', 'document', 'link', 'text']),
   title: z.string(),
   fileSizeBytes: z.number(),
   mimeType: z.string(),
@@ -93,11 +94,34 @@ const contentItemSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
-export const authResponseSchema = apiSuccessEnvelope(
+export const signupResponseSchema = apiSuccessEnvelope(
+  z.object({
+    user: userSchema,
+    message: z.string(),
+    verificationRequired: z.literal(true),
+  })
+);
+
+export const authSessionResponseSchema = apiSuccessEnvelope(
   z.object({
     user: userSchema,
     accessToken: z.string(),
-    refreshToken: z.string().optional(),
+  })
+);
+
+export const authMessageResponseSchema = apiSuccessEnvelope(
+  z.object({
+    message: z.string(),
+  })
+);
+
+export const currentUserResponseSchema = apiSuccessEnvelope(
+  z.object({
+    user: userSchema,
+    session: z.object({
+      sessionId: z.string(),
+      expiresAt: z.string(),
+    }),
   })
 );
 
@@ -150,7 +174,7 @@ export const requestSchemas = {
     description: z.string().max(500).optional(),
   }),
   generateInviteLink: z.object({
-    role: z.enum(['admin', 'viewer']),
+    role: z.enum(['admin', 'editor', 'viewer']),
     expiresIn: z.enum(['24h', '7d', '30d', 'never']),
     isSingleUse: z.boolean().optional(),
   }),
@@ -172,12 +196,25 @@ export const requestSchemas = {
     password: z.string().min(8).optional(),
     createAccount: z.boolean().optional(),
   }),
+  verifyEmail: z.object({
+    token: z.string().min(1),
+  }),
+  forgotPassword: z.object({
+    email: z.string().email(),
+  }),
+  resetPassword: z.object({
+    token: z.string().min(1),
+    password: z.string().min(8),
+  }),
 };
 
 export const responseSchemas = {
   apiErrorSchema,
   health: healthResponseSchema,
-  auth: authResponseSchema,
+  signup: signupResponseSchema,
+  auth: authSessionResponseSchema,
+  authMessage: authMessageResponseSchema,
+  currentUser: currentUserResponseSchema,
   room: roomResponseSchema,
   rooms: roomsResponseSchema,
   roomMembers: roomMembersResponseSchema,

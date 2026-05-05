@@ -1,7 +1,12 @@
 import Fastify from 'fastify';
+import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import { z } from 'zod';
 import { loadEnvironment } from './config/env';
 import { AppError, buildRequestMeta, normalizeError, sendError, sendSuccess } from './lib/http';
+import { registerAuthRoutes } from './modules/auth/auth.routes';
+import { registerRoomRoutes } from './modules/rooms/rooms.routes';
 
 const env = loadEnvironment();
 const API_VERSION = 'v1';
@@ -33,6 +38,16 @@ async function start(): Promise<void> {
           }),
     },
     requestIdHeader: 'x-request-id',
+  });
+
+  await app.register(cookie);
+  await app.register(cors, {
+    origin: env.APP_URL,
+    credentials: true,
+  });
+  await app.register(helmet, {
+    global: true,
+    contentSecurityPolicy: false,
   });
 
   const requestStartTimes = new WeakMap<object, number>();
@@ -96,7 +111,6 @@ async function start(): Promise<void> {
     sendError(reply, error, request.id);
   });
 
-  // Health check endpoint
   app.get('/health', async (request, reply) => {
     const payload = healthResponseSchema.parse({
       status: 'ok',
@@ -108,7 +122,6 @@ async function start(): Promise<void> {
     return sendSuccess(reply, payload, 200, buildRequestMeta(request, API_VERSION));
   });
 
-  // API version endpoint
   app.get('/api/v1/health', async (request, reply) => {
     const payload = healthResponseSchema.parse({
       status: 'ok',
@@ -120,7 +133,6 @@ async function start(): Promise<void> {
     return sendSuccess(reply, payload, 200, buildRequestMeta(request, API_VERSION));
   });
 
-  // Basic routes for testing
   app.get('/api/v1/test', async (request, reply) => {
     const query = testQuerySchema.parse(request.query);
     const payload = {
@@ -131,6 +143,9 @@ async function start(): Promise<void> {
 
     return sendSuccess(reply, payload, 200, buildRequestMeta(request, API_VERSION));
   });
+
+  await registerAuthRoutes(app, { env });
+  await registerRoomRoutes(app, { env });
 
   try {
     await app.listen({ port: env.PORT, host: env.HOST });

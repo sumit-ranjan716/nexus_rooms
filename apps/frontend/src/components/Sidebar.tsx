@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
+import { authService } from '../services/authService';
 import { useAuthStore } from '../store';
 
 function Sidebar(): JSX.Element {
@@ -8,8 +9,10 @@ function Sidebar(): JSX.Element {
   const isActive = (path: string): boolean => location.pathname === path;
 
   const handleLogout = (): void => {
-    clearAuth();
-    window.location.href = '/login';
+    authService.logout().finally(() => {
+      clearAuth();
+      window.location.href = '/login';
+    });
   };
 
   return (

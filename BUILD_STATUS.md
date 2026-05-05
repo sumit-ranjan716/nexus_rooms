@@ -287,18 +287,18 @@ curl http://localhost:3001/api/v1/health
 ## What's Next (Phase 2: Authentication)
 
 ### Week 1 Deliverables
-1. [ ] Password hashing (bcrypt)
-2. [ ] JWT flow (signup/login/refresh)
-3. [ ] Email verification
-4. [ ] Backend auth endpoints
-5. [ ] Frontend login integration
+1. [x] Password hashing (bcrypt)
+2. [x] JWT flow (signup/login/refresh)
+3. [x] Email verification
+4. [x] Backend auth endpoints
+5. [x] Frontend login integration
 
 ### Week 2 Deliverables
-1. [ ] Logout and token refresh
-2. [ ] Password reset flow
-3. [ ] Protected routes
-4. [ ] RBAC middleware
-5. [ ] Database RLS policies
+1. [x] Logout and token refresh
+2. [x] Password reset flow
+3. [x] Protected routes
+4. [x] RBAC middleware
+5. [x] Database RLS policies (prep migration scaffold)
 
 **Estimated**: 2 weeks (10 working days)
 

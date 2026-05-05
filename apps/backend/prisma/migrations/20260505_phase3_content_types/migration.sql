@@ -1,0 +1,3 @@
+ALTER TYPE "ContentType" ADD VALUE IF NOT EXISTS 'document';
+ALTER TYPE "ContentType" ADD VALUE IF NOT EXISTS 'link';
+ALTER TYPE "ContentType" ADD VALUE IF NOT EXISTS 'text';

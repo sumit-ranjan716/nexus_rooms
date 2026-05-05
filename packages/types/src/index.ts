@@ -6,6 +6,7 @@ export interface User {
   avatarUrl: string | null;
   emailVerified: boolean;
   createdAt: string;
+  updatedAt: string;
 }
 
 // Room Types
@@ -22,7 +23,7 @@ export interface Room {
 }
 
 // Room Member Types
-export type RoomRole = 'admin' | 'viewer';
+export type RoomRole = 'admin' | 'editor' | 'viewer';
 
 export interface RoomMember {
   id: string;
@@ -50,7 +51,7 @@ export interface InviteLink {
 }
 
 // Content Item Types
-export type ContentType = 'pdf' | 'image';
+export type ContentType = 'pdf' | 'image' | 'document' | 'link' | 'text';
 
 export interface ContentItem {
   id: string;
@@ -127,6 +128,24 @@ export interface LoginRequest {
 export interface LoginResponse {
   user: User;
   accessToken: string;
+}
+
+export interface SignupResponse {
+  user: User;
+  message: string;
+  verificationRequired: true;
+}
+
+export interface AuthMessageResponse {
+  message: string;
+}
+
+export interface CurrentUserResponse {
+  user: User;
+  session: {
+    sessionId: string;
+    expiresAt: string;
+  };
 }
 
 export interface SignUpRequest {
