@@ -35,13 +35,18 @@ model User {
   updatedAt             DateTime                 @updatedAt
 
   // Relations
-  rooms                 Room[]
-  roomMembers           RoomMember[]
-  contentItems          ContentItem[]
-  inviteLinks           InviteLink[]
-  passwordResetTokens    PasswordResetToken[]
+  rooms                   Room[]
+  roomMembers             RoomMember[]
+  contentItems            ContentItem[]
+  inviteLinks             InviteLink[]
+  passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
-  refreshSessions       RefreshSession[]
+  refreshSessions         RefreshSession[]
+  folders                 Folder[]
+  contentVersions         ContentVersion[]
+  comments                Comment[]
+  notifications           Notification[]
+  activities              ActivityLog[]
 
   @@map("users")
 }
@@ -58,10 +63,14 @@ model Room {
   updatedAt         DateTime     @updatedAt
 
   // Relations
-  creator           User      @relation(fields: [createdBy], references: [id])
+  creator           User         @relation(fields: [createdBy], references: [id])
   members           RoomMember[]
   contentItems      ContentItem[]
   inviteLinks       InviteLink[]
+  folders           Folder[]
+  tags              Tag[]
+  notifications     Notification[]
+  activities        ActivityLog[]
 
   @@index([createdBy])
   @@index([slug])
@@ -112,6 +121,7 @@ model InviteLink {
 model ContentItem {
   id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   roomId            String       @db.Uuid
+  folderId          String?      @db.Uuid
   createdBy         String       @db.Uuid
   type              ContentType
   title             String       @db.VarChar(255)
@@ -124,10 +134,16 @@ model ContentItem {
   updatedAt         DateTime     @updatedAt
 
   // Relations
-  room              Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  creator           User      @relation(fields: [createdBy], references: [id])
+  room              Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  folder            Folder?          @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  creator           User             @relation(fields: [createdBy], references: [id])
+  versions          ContentVersion[]
+  tags              ContentTag[]
+  comments          Comment[]
+  notifications     Notification[]
 
   @@index([roomId])
+  @@index([folderId])
   @@index([createdBy])
   @@index([type])
   @@index([roomId, isDeleted, createdAt])
@@ -184,4 +200,124 @@ model RefreshSession {
   @@index([familyId])
   @@index([expiresAt])
   @@map("refresh_sessions")
+}
+
+model Folder {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId    String   @db.Uuid
+  parentId  String?  @db.Uuid
+  name      String   @db.VarChar(120)
+  createdBy String   @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  room         Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  creator      User          @relation(fields: [createdBy], references: [id])
+  parent       Folder?       @relation("FolderToFolder", fields: [parentId], references: [id], onDelete: Cascade)
+  subfolders   Folder[]      @relation("FolderToFolder")
+  contentItems ContentItem[]
+
+  @@index([roomId])
+  @@index([parentId])
+  @@map("folders")
+}
+
+model ContentVersion {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contentItemId String   @db.Uuid
+  versionNumber Int
+  storageKey    String   @db.VarChar(512)
+  snapshot      Json?    // Optional JSON snapshot for rich text versions
+  createdBy     String   @db.Uuid
+  createdAt     DateTime @default(now())
+  changeSummary String?  @db.VarChar(255)
+
+  contentItem ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  creator     User        @relation(fields: [createdBy], references: [id])
+
+  @@index([contentItemId])
+  @@map("content_versions")
+}
+
+model Tag {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId    String       @db.Uuid
+  name      String       @db.VarChar(50)
+  color     String       @db.VarChar(20) // e.g. HSL or tailwind palette
+  createdAt DateTime     @default(now())
+
+  room         Room         @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  contentItems ContentTag[]
+
+  @@unique([roomId, name])
+  @@index([roomId])
+  @@map("tags")
+}
+
+model ContentTag {
+  contentItemId String @db.Uuid
+  tagId         String @db.Uuid
+
+  contentItem ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  tag         Tag         @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contentItemId, tagId])
+  @@map("content_tags")
+}
+
+model Comment {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contentItemId String   @db.Uuid
+  parentId      String?  @db.Uuid
+  authorId      String   @db.Uuid
+  body          String   @db.Text
+  isEdited      Boolean  @default(false)
+  isDeleted     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  contentItem ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  author      User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent      Comment?    @relation("CommentToComment", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Comment[]   @relation("CommentToComment")
+
+  @@index([contentItemId])
+  @@index([parentId])
+  @@map("comments")
+}
+
+model Notification {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String   @db.Uuid
+  roomId        String   @db.Uuid
+  contentItemId String?  @db.Uuid
+  type          String   @db.VarChar(50)
+  payload       Json
+  isRead        Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room        Room         @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  contentItem ContentItem? @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model ActivityLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId     String   @db.Uuid
+  actorId    String   @db.Uuid
+  action     String   @db.VarChar(50)
+  targetType String   @db.VarChar(50)
+  targetId   String?  @db.Uuid
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  room  Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@index([roomId, createdAt])
+  @@map("activity_log")
 }

@@ -154,6 +154,93 @@ export const downloadUrlResponseSchema = apiSuccessEnvelope(
 );
 export const emptyResponseSchema = apiSuccessEnvelope(z.null());
 
+// Expanded schemas
+const folderSchema = z.object({
+  id: z.string(),
+  roomId: z.string(),
+  parentId: z.string().nullable(),
+  name: z.string(),
+  createdBy: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+const tagSchema = z.object({
+  id: z.string(),
+  roomId: z.string(),
+  name: z.string(),
+  color: z.string(),
+  createdAt: z.string(),
+});
+
+const baseCommentSchema = z.object({
+  id: z.string(),
+  contentItemId: z.string(),
+  parentId: z.string().nullable(),
+  authorId: z.string(),
+  author: z
+    .object({
+      displayName: z.string().nullable(),
+      email: z.string().email(),
+    })
+    .optional(),
+  body: z.string(),
+  isEdited: z.boolean(),
+  isDeleted: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+type CommentSchemaType = z.infer<typeof baseCommentSchema> & {
+  replies?: CommentSchemaType[];
+};
+
+const commentSchema: z.ZodType<CommentSchemaType> = baseCommentSchema.extend({
+  replies: z.lazy(() => z.array(commentSchema)).optional(),
+});
+
+const contentVersionSchema = z.object({
+  id: z.string(),
+  contentItemId: z.string(),
+  versionNumber: z.number(),
+  storageKey: z.string(),
+  snapshot: z.unknown().optional(),
+  createdBy: z.string(),
+  createdAt: z.string(),
+  changeSummary: z.string().nullable(),
+  creator: z
+    .object({
+      displayName: z.string().nullable(),
+    })
+    .optional(),
+});
+
+const activityLogSchema = z.object({
+  id: z.string(),
+  roomId: z.string(),
+  actorId: z.string(),
+  actor: z
+    .object({
+      displayName: z.string().nullable(),
+    })
+    .optional(),
+  action: z.string(),
+  targetType: z.string(),
+  targetId: z.string().nullable(),
+  metadata: z.unknown().optional(),
+  createdAt: z.string(),
+});
+
+export const folderResponseSchema = apiSuccessEnvelope(folderSchema);
+export const foldersResponseSchema = apiSuccessEnvelope(z.array(folderSchema));
+export const tagResponseSchema = apiSuccessEnvelope(tagSchema);
+export const tagsResponseSchema = apiSuccessEnvelope(z.array(tagSchema));
+export const commentResponseSchema = apiSuccessEnvelope(commentSchema);
+export const commentsResponseSchema = apiSuccessEnvelope(z.array(commentSchema));
+export const contentVersionResponseSchema = apiSuccessEnvelope(contentVersionSchema);
+export const versionsResponseSchema = apiSuccessEnvelope(z.array(contentVersionSchema));
+export const activityLogResponseSchema = apiSuccessEnvelope(z.array(activityLogSchema));
+
 export const requestSchemas = {
   login: z.object({
     email: z.string().email(),
@@ -184,11 +271,13 @@ export const requestSchemas = {
     fileSizeBytes: z.number().int().positive(),
   }),
   createContent: z.object({
-    uploadId: z.string().min(1),
+    uploadId: z.string().min(1).optional(),
     filename: z.string().min(1).max(255),
     title: z.string().min(1).max(255).optional(),
     mimeType: z.string().min(1).max(255),
     fileSizeBytes: z.number().int().positive(),
+    folderId: z.string().uuid().nullable().optional(),
+    tagIds: z.array(z.string().uuid()).optional(),
   }),
   joinRoom: z.object({
     roomId: z.string().uuid(),
@@ -205,6 +294,18 @@ export const requestSchemas = {
   resetPassword: z.object({
     token: z.string().min(1),
     password: z.string().min(8),
+  }),
+  createFolder: z.object({
+    name: z.string().min(1).max(120),
+    parentId: z.string().uuid().nullable().optional(),
+  }),
+  createTag: z.object({
+    name: z.string().min(1).max(50),
+    color: z.string().min(1).max(20),
+  }),
+  createComment: z.object({
+    body: z.string().min(1),
+    parentId: z.string().uuid().nullable().optional(),
   }),
 };
 
@@ -226,6 +327,16 @@ export const responseSchemas = {
   presignedUrl: presignedUrlResponseSchema,
   downloadUrl: downloadUrlResponseSchema,
   empty: emptyResponseSchema,
+  folder: folderResponseSchema,
+  folders: foldersResponseSchema,
+  tag: tagResponseSchema,
+  tags: tagsResponseSchema,
+  comment: commentResponseSchema,
+  comments: commentsResponseSchema,
+  version: contentVersionResponseSchema,
+  versions: versionsResponseSchema,
+  activityLog: activityLogResponseSchema,
+  contentItemsList: apiSuccessEnvelope(z.array(contentItemSchema)),
 };
 
 export type ApiResponseSchema = typeof responseSchemas;

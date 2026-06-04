@@ -37,7 +37,7 @@ class ApiClient {
     const url = `${this.baseUrl}${endpoint}`;
     const response = await fetch(url, {
       headers: {
-        'Content-Type': 'application/json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
         ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
         ...options.headers,
       },
@@ -321,6 +321,93 @@ class ApiClient {
     z.string().uuid().parse(contentId);
 
     await this.request(`/api/v1/content/${contentId}`, { method: 'DELETE' }, responseSchemas.empty);
+  }
+
+  // Folders
+  async getFolders(roomId: string): Promise<Types.Folder[]> {
+    z.string().uuid().parse(roomId);
+    return this.request(`/api/v1/rooms/${roomId}/folders`, {}, responseSchemas.folders).then((response) => response.data);
+  }
+
+  async createFolder(roomId: string, data: Types.CreateFolderRequest): Promise<Types.Folder> {
+    z.string().uuid().parse(roomId);
+    const payload = requestSchemas.createFolder.parse(data);
+    return this.request(`/api/v1/rooms/${roomId}/folders`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.folder).then((response) => response.data);
+  }
+
+  async updateFolder(roomId: string, folderId: string, name: string): Promise<Types.Folder> {
+    z.string().uuid().parse(roomId);
+    z.string().uuid().parse(folderId);
+    return this.request(`/api/v1/rooms/${roomId}/folders/${folderId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    }, responseSchemas.folder).then((response) => response.data);
+  }
+
+  async deleteFolder(roomId: string, folderId: string): Promise<void> {
+    z.string().uuid().parse(roomId);
+    z.string().uuid().parse(folderId);
+    await this.request(`/api/v1/rooms/${roomId}/folders/${folderId}`, { method: 'DELETE' }, responseSchemas.empty);
+  }
+
+  // Tags
+  async getTags(roomId: string): Promise<Types.Tag[]> {
+    z.string().uuid().parse(roomId);
+    return this.request(`/api/v1/rooms/${roomId}/tags`, {}, responseSchemas.tags).then((response) => response.data);
+  }
+
+  async createTag(roomId: string, data: Types.CreateTagRequest): Promise<Types.Tag> {
+    z.string().uuid().parse(roomId);
+    const payload = requestSchemas.createTag.parse(data);
+    return this.request(`/api/v1/rooms/${roomId}/tags`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.tag).then((response) => response.data);
+  }
+
+  // Comments
+  async getComments(contentId: string): Promise<Types.Comment[]> {
+    z.string().uuid().parse(contentId);
+    return this.request(`/api/v1/content/${contentId}/comments`, {}, responseSchemas.comments).then((response) => response.data);
+  }
+
+  async createComment(contentId: string, data: Types.CreateCommentRequest): Promise<Types.Comment> {
+    z.string().uuid().parse(contentId);
+    const payload = requestSchemas.createComment.parse(data);
+    return this.request(`/api/v1/content/${contentId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.comment).then((response) => response.data);
+  }
+
+  // Versions
+  async getVersions(contentId: string): Promise<Types.ContentVersion[]> {
+    z.string().uuid().parse(contentId);
+    return this.request(`/api/v1/content/${contentId}/versions`, {}, responseSchemas.versions).then((response) => response.data);
+  }
+
+  async rollbackVersion(contentId: string, versionId: string): Promise<void> {
+    z.string().uuid().parse(contentId);
+    z.string().uuid().parse(versionId);
+    await this.request(`/api/v1/content/${contentId}/versions/${versionId}/rollback`, { method: 'POST' }, responseSchemas.empty);
+  }
+
+  // Search & Activity Log
+  async searchRoom(roomId: string, query: string, filters?: { type?: string; folderId?: string; tagId?: string }): Promise<Types.ContentItem[]> {
+    z.string().uuid().parse(roomId);
+    let url = `/api/v1/rooms/${roomId}/search?q=${encodeURIComponent(query)}`;
+    if (filters?.type) url += `&type=${filters.type}`;
+    if (filters?.folderId) url += `&folderId=${filters.folderId}`;
+    if (filters?.tagId) url += `&tagId=${filters.tagId}`;
+    return this.request(url, {}, responseSchemas.contentItemsList).then((response) => response.data);
+  }
+
+  async getActivityLog(roomId: string): Promise<Types.ActivityLog[]> {
+    z.string().uuid().parse(roomId);
+    return this.request(`/api/v1/rooms/${roomId}/activity`, {}, responseSchemas.activityLog).then((response) => response.data);
   }
 }
 

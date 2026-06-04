@@ -212,4 +212,106 @@ export interface CreateContentRequest {
   title?: string;
   mimeType: string;
   fileSizeBytes: number;
+  folderId?: string | null;
+  tagIds?: string[];
 }
+
+// Folder Types
+export interface Folder {
+  id: string;
+  roomId: string;
+  parentId: string | null;
+  name: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateFolderRequest {
+  name: string;
+  parentId?: string | null;
+}
+
+export interface UpdateFolderRequest {
+  name: string;
+}
+
+// Tag Types
+export interface Tag {
+  id: string;
+  roomId: string;
+  name: string;
+  color: string;
+  createdAt: string;
+}
+
+export interface CreateTagRequest {
+  name: string;
+  color: string;
+}
+
+// Comment Types
+export interface Comment {
+  id: string;
+  contentItemId: string;
+  parentId: string | null;
+  authorId: string;
+  author?: {
+    displayName: string | null;
+    email: string;
+  };
+  body: string;
+  isEdited: boolean;
+  isDeleted: boolean;
+  createdAt: string;
+  updatedAt: string;
+  replies?: Comment[];
+}
+
+export interface CreateCommentRequest {
+  body: string;
+  parentId?: string | null;
+}
+
+// Content Version Types
+export interface ContentVersion {
+  id: string;
+  contentItemId: string;
+  versionNumber: number;
+  storageKey: string;
+  snapshot?: unknown;
+  createdBy: string;
+  createdAt: string;
+  changeSummary: string | null;
+  creator?: {
+    displayName: string | null;
+  };
+}
+
+// Notification Types
+export interface Notification {
+  id: string;
+  userId: string;
+  roomId: string;
+  contentItemId: string | null;
+  type: string; // 'comment' | 'upload' | 'invite'
+  payload: unknown;
+  isRead: boolean;
+  createdAt: string;
+}
+
+// Activity Log Types
+export interface ActivityLog {
+  id: string;
+  roomId: string;
+  actorId: string;
+  actor?: {
+    displayName: string | null;
+  };
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  metadata?: unknown;
+  createdAt: string;
+}
+

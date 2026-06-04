@@ -7,7 +7,7 @@ function Layout(): JSX.Element {
   const { sidebarOpen } = useUIStore();
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-background text-foreground transition-colors duration-300 overflow-hidden">
       {/* Sidebar */}
       {sidebarOpen && <Sidebar />}
 
@@ -17,8 +17,8 @@ function Layout(): JSX.Element {
         <Header />
 
         {/* Page Content */}
-        <main className="flex-1 overflow-y-auto">
-          <div className="p-6">
+        <main className="flex-1 overflow-y-auto bg-background/50 transition-colors duration-300">
+          <div className="p-6 max-w-7xl mx-auto w-full">
             <Outlet />
           </div>
         </main>

@@ -1,5 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import bcrypt from 'bcrypt';
 import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Prisma } from '@prisma/client';
 import type { ContentType, RoomRole } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
@@ -40,6 +43,8 @@ const createContentSchema = z.object({
   fileSizeBytes: z.number().int().nonnegative(),
   type: contentTypeSchema.optional(),
   metadata: z.record(z.unknown()).optional(),
+  folderId: z.string().uuid().nullable().optional(),
+  tagIds: z.array(z.string().uuid()).optional(),
 });
 const presignedUrlSchema = z.object({
   filename: z.string().min(1).max(255),
@@ -128,6 +133,7 @@ function serializeInvite(invite: {
 function serializeContentItem(item: {
   id: string;
   roomId: string;
+  folderId?: string | null;
   type: ContentType;
   title: string;
   fileSizeBytes: number;
@@ -136,10 +142,12 @@ function serializeContentItem(item: {
   createdAt: Date;
   updatedAt: Date;
   metadata: unknown;
+  tags?: any[];
 }) {
   return {
     id: item.id,
     roomId: item.roomId,
+    folderId: item.folderId ?? null,
     type: item.type,
     title: item.title,
     fileSizeBytes: item.fileSizeBytes,
@@ -148,10 +156,59 @@ function serializeContentItem(item: {
     createdAt: item.createdAt.toISOString(),
     updatedAt: item.updatedAt.toISOString(),
     ...(item.metadata && typeof item.metadata === 'object' ? { metadata: item.metadata as Record<string, unknown> } : {}),
+    ...(item.tags ? { tags: item.tags.map((t: any) => ({ id: t.tag.id, name: t.tag.name, color: t.tag.color })) } : {}),
   };
 }
 
+const activeStreams = new Map<string, Set<any>>();
+
+export function broadcastToRoom(roomId: string, event: string, data: any) {
+  const streams = activeStreams.get(roomId);
+  if (!streams) return;
+
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const reply of streams) {
+    try {
+      reply.raw.write(payload);
+    } catch (e) {
+      streams.delete(reply);
+    }
+  }
+}
+
 export async function registerRoomRoutes(app: FastifyInstance, options: RoomRouteOptions): Promise<void> {
+  // Real-time server-sent events stream
+  app.get('/api/v1/rooms/:roomId/stream', async (request, reply) => {
+    const roomId = (request.params as any).roomId;
+    
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    if (!activeStreams.has(roomId)) {
+      activeStreams.set(roomId, new Set());
+    }
+    activeStreams.get(roomId)!.add(reply);
+
+    request.raw.on('close', () => {
+      activeStreams.get(roomId)?.delete(reply);
+      if (activeStreams.get(roomId)?.size === 0) {
+        activeStreams.delete(roomId);
+      }
+    });
+
+    // Keep-alive heartbeat every 15 seconds
+    const interval = setInterval(() => {
+      reply.raw.write(':keepalive\n\n');
+    }, 15000);
+
+    request.raw.on('close', () => {
+      clearInterval(interval);
+    });
+  });
   app.get('/api/v1/rooms', async (request, reply) => {
     const auth = await authenticateRequest(request, options.env);
 
@@ -382,6 +439,13 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
 
     const items = await prisma.contentItem.findMany({
       where: { roomId: params.roomId, isDeleted: false },
+      include: {
+        tags: {
+          include: {
+            tag: true
+          }
+        }
+      },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -391,10 +455,10 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
   app.post('/api/v1/rooms/:roomId/content/presign', async (request, reply) => {
     await authenticateRequest(request, options.env);
     const params = roomIdParamsSchema.parse(request.params);
-    presignedUrlSchema.parse(request.body);
+    const body = presignedUrlSchema.parse(request.body);
 
     const uploadId = randomBytes(16).toString('hex');
-    const presignedUrl = `${options.env.APP_URL}/api/v1/uploads?roomId=${params.roomId}&uploadId=${uploadId}`;
+    const presignedUrl = `${options.env.APP_URL}/api/v1/uploads?roomId=${params.roomId}&uploadId=${uploadId}&filename=${encodeURIComponent(body.filename)}`;
     return sendSuccess(reply, { uploadId, presignedUrl, expiresIn: 900 }, 200, buildRequestMeta(request, 'v1'));
   });
 
@@ -404,20 +468,59 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
     const body = createContentSchema.parse(request.body);
     await requireRoomRole(auth.userId, params.roomId, 'editor');
 
+    const storageKey = body.uploadId ? `${params.roomId}/${body.uploadId}/${body.filename}` : `${params.roomId}/direct/${body.filename}`;
+
     const item = await prisma.contentItem.create({
       data: {
         roomId: params.roomId,
+        folderId: body.folderId ?? null,
         createdBy: auth.userId,
         type: body.type ?? inferContentType(body.mimeType),
         title: body.title ?? body.filename,
-        storageKey: `${params.roomId}/${body.uploadId ?? randomBytes(8).toString('hex')}/${body.filename}`,
+        storageKey,
         fileSizeBytes: body.fileSizeBytes,
         mimeType: body.mimeType,
-        ...(body.metadata !== undefined
-          ? { metadata: body.metadata as Prisma.InputJsonValue }
-          : {}),
+        ...(body.metadata !== undefined ? { metadata: body.metadata as Prisma.InputJsonValue } : {}),
+        ...(body.tagIds && body.tagIds.length > 0 ? {
+          tags: {
+            create: body.tagIds.map(tagId => ({ tagId }))
+          }
+        } : {}),
+      },
+      include: {
+        tags: {
+          include: {
+            tag: true
+          }
+        }
+      }
+    });
+
+    // Asynchronously create the first version history entry
+    await prisma.contentVersion.create({
+      data: {
+        contentItemId: item.id,
+        versionNumber: 1,
+        storageKey: item.storageKey,
+        createdBy: auth.userId,
+        changeSummary: 'Initial upload',
+        ...(body.metadata ? { snapshot: body.metadata as any } : {}),
       },
     });
+
+    // Asynchronously create the activity log entry
+    await prisma.activityLog.create({
+      data: {
+        roomId: params.roomId,
+        actorId: auth.userId,
+        action: 'upload_file',
+        targetType: 'content',
+        targetId: item.id,
+        metadata: { filename: item.title },
+      },
+    });
+
+    broadcastToRoom(params.roomId, 'CONTENT_ADDED', serializeContentItem(item));
 
     return sendSuccess(reply, serializeContentItem(item), 201, buildRequestMeta(request, 'v1'));
   });
@@ -442,6 +545,370 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
 
     await requireRoomRole(auth.userId, item.roomId, 'editor');
     await prisma.contentItem.update({ where: { id: params.contentId }, data: { isDeleted: true } });
+
+    await prisma.activityLog.create({
+      data: {
+        roomId: item.roomId,
+        actorId: auth.userId,
+        action: 'delete_file',
+        targetType: 'content',
+        targetId: item.id,
+        metadata: { filename: item.title },
+      },
+    });
+
+    broadcastToRoom(item.roomId, 'CONTENT_DELETED', { id: item.id });
+
     return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  // Local disk uploads handler (Virtual S3 simulation)
+  app.put('/api/v1/uploads', async (request, reply) => {
+    const roomId = (request.query as any).roomId;
+    const uploadId = (request.query as any).uploadId;
+    const filename = (request.headers['x-filename'] as string) || (request.query as any).filename || 'file';
+
+    if (!roomId || !uploadId) {
+      throw new AppError('Missing roomId or uploadId', 400, 'BAD_REQUEST');
+    }
+
+    const uploadDir = path.join(process.cwd(), 'uploads', roomId, uploadId);
+    fs.mkdirSync(uploadDir, { recursive: true });
+
+    const filePath = path.join(uploadDir, filename);
+    const writeStream = fs.createWriteStream(filePath);
+
+    await new Promise<void>((resolve, reject) => {
+      request.raw.pipe(writeStream);
+      request.raw.on('end', () => resolve());
+      request.raw.on('error', (err) => reject(err));
+    });
+
+    return sendSuccess(reply, { success: true, filePath: `/uploads/${roomId}/${uploadId}/${filename}` }, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  // Folder Routes
+  app.get('/api/v1/rooms/:roomId/folders', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    await requireRoomRole(auth.userId, params.roomId, 'viewer');
+
+    const folders = await prisma.folder.findMany({
+      where: { roomId: params.roomId },
+      orderBy: { name: 'asc' },
+    });
+
+    return sendSuccess(reply, folders, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.post('/api/v1/rooms/:roomId/folders', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    const body = z.object({
+      name: z.string().trim().min(1).max(120),
+      parentId: z.string().uuid().nullable().optional(),
+    }).parse(request.body);
+    await requireRoomRole(auth.userId, params.roomId, 'editor');
+
+    const folder = await prisma.folder.create({
+      data: {
+        roomId: params.roomId,
+        parentId: body.parentId ?? null,
+        name: body.name,
+        createdBy: auth.userId,
+      },
+    });
+
+    broadcastToRoom(params.roomId, 'FOLDER_ADDED', folder);
+
+    return sendSuccess(reply, folder, 201, buildRequestMeta(request, 'v1'));
+  });
+
+  app.put('/api/v1/rooms/:roomId/folders/:folderId', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ roomId: z.string().uuid(), folderId: z.string().uuid() }).parse(request.params);
+    const body = z.object({ name: z.string().trim().min(1).max(120) }).parse(request.body);
+    await requireRoomRole(auth.userId, params.roomId, 'editor');
+
+    const folder = await prisma.folder.update({
+      where: { id: params.folderId, roomId: params.roomId },
+      data: { name: body.name },
+    });
+
+    broadcastToRoom(params.roomId, 'FOLDER_UPDATED', folder);
+
+    return sendSuccess(reply, folder, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.delete('/api/v1/rooms/:roomId/folders/:folderId', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ roomId: z.string().uuid(), folderId: z.string().uuid() }).parse(request.params);
+    await requireRoomRole(auth.userId, params.roomId, 'editor');
+
+    await prisma.folder.delete({
+      where: { id: params.folderId, roomId: params.roomId },
+    });
+
+    broadcastToRoom(params.roomId, 'FOLDER_DELETED', { id: params.folderId });
+
+    return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  // Tag Routes
+  app.get('/api/v1/rooms/:roomId/tags', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    await requireRoomRole(auth.userId, params.roomId, 'viewer');
+
+    const tags = await prisma.tag.findMany({
+      where: { roomId: params.roomId },
+      orderBy: { name: 'asc' },
+    });
+
+    return sendSuccess(reply, tags, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.post('/api/v1/rooms/:roomId/tags', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    const body = z.object({
+      name: z.string().trim().min(1).max(50),
+      color: z.string().trim().min(1).max(20),
+    }).parse(request.body);
+    await requireRoomRole(auth.userId, params.roomId, 'editor');
+
+    const tag = await prisma.tag.upsert({
+      where: { roomId_name: { roomId: params.roomId, name: body.name } },
+      update: { color: body.color },
+      create: {
+        roomId: params.roomId,
+        name: body.name,
+        color: body.color,
+      },
+    });
+
+    return sendSuccess(reply, tag, 201, buildRequestMeta(request, 'v1'));
+  });
+
+  // Comment Routes
+  app.get('/api/v1/content/:contentId/comments', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ contentId: z.string().uuid() }).parse(request.params);
+
+    const contentItem = await prisma.contentItem.findUnique({
+      where: { id: params.contentId, isDeleted: false },
+    });
+    if (!contentItem) throw new AppError('Content not found', 404, 'NOT_FOUND');
+
+    await requireRoomRole(auth.userId, contentItem.roomId, 'viewer');
+
+    const comments = await prisma.comment.findMany({
+      where: { contentItemId: params.contentId, isDeleted: false },
+      include: { author: { select: { displayName: true, email: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return sendSuccess(reply, comments.map(c => ({
+      id: c.id,
+      contentItemId: c.contentItemId,
+      parentId: c.parentId,
+      authorId: c.authorId,
+      author: { displayName: c.author.displayName, email: c.author.email },
+      body: c.body,
+      isEdited: c.isEdited,
+      isDeleted: c.isDeleted,
+      createdAt: c.createdAt.toISOString(),
+      updatedAt: c.updatedAt.toISOString(),
+    })), 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.post('/api/v1/content/:contentId/comments', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ contentId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      body: z.string().min(1),
+      parentId: z.string().uuid().nullable().optional(),
+    }).parse(request.body);
+
+    const contentItem = await prisma.contentItem.findUnique({
+      where: { id: params.contentId, isDeleted: false },
+    });
+    if (!contentItem) throw new AppError('Content not found', 404, 'NOT_FOUND');
+
+    await requireRoomRole(auth.userId, contentItem.roomId, 'viewer');
+
+    const comment = await prisma.comment.create({
+      data: {
+        contentItemId: params.contentId,
+        parentId: body.parentId ?? null,
+        authorId: auth.userId,
+        body: body.body,
+      },
+      include: { author: { select: { displayName: true, email: true } } },
+    });
+
+    await prisma.activityLog.create({
+      data: {
+        roomId: contentItem.roomId,
+        actorId: auth.userId,
+        action: 'add_comment',
+        targetType: 'comment',
+        targetId: comment.id,
+        metadata: { filename: contentItem.title },
+      },
+    });
+
+    const serializedComment = {
+      id: comment.id,
+      contentItemId: comment.contentItemId,
+      parentId: comment.parentId,
+      authorId: comment.authorId,
+      author: { displayName: comment.author.displayName, email: comment.author.email },
+      body: comment.body,
+      isEdited: comment.isEdited,
+      isDeleted: comment.isDeleted,
+      createdAt: comment.createdAt.toISOString(),
+      updatedAt: comment.updatedAt.toISOString(),
+    };
+
+    broadcastToRoom(contentItem.roomId, 'COMMENT_ADDED', serializedComment);
+
+    return sendSuccess(reply, serializedComment, 201, buildRequestMeta(request, 'v1'));
+  });
+
+  // Content Version Routes
+  app.get('/api/v1/content/:contentId/versions', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ contentId: z.string().uuid() }).parse(request.params);
+
+    const contentItem = await prisma.contentItem.findUnique({
+      where: { id: params.contentId, isDeleted: false },
+    });
+    if (!contentItem) throw new AppError('Content not found', 404, 'NOT_FOUND');
+
+    await requireRoomRole(auth.userId, contentItem.roomId, 'viewer');
+
+    const versions = await prisma.contentVersion.findMany({
+      where: { contentItemId: params.contentId },
+      include: { creator: { select: { displayName: true } } },
+      orderBy: { versionNumber: 'desc' },
+    });
+
+    return sendSuccess(reply, versions.map(v => ({
+      id: v.id,
+      contentItemId: v.contentItemId,
+      versionNumber: v.versionNumber,
+      storageKey: v.storageKey,
+      snapshot: v.snapshot,
+      createdBy: v.createdBy,
+      createdAt: v.createdAt.toISOString(),
+      changeSummary: v.changeSummary,
+      creator: { displayName: v.creator.displayName },
+    })), 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.post('/api/v1/content/:contentId/versions/:versionId/rollback', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ contentId: z.string().uuid(), versionId: z.string().uuid() }).parse(request.params);
+
+    const contentItem = await prisma.contentItem.findUnique({
+      where: { id: params.contentId, isDeleted: false },
+    });
+    if (!contentItem) throw new AppError('Content not found', 404, 'NOT_FOUND');
+
+    await requireRoomRole(auth.userId, contentItem.roomId, 'editor');
+
+    const version = await prisma.contentVersion.findUnique({
+      where: { id: params.versionId },
+    });
+    if (!version || version.contentItemId !== params.contentId) throw new AppError('Version not found', 404, 'NOT_FOUND');
+
+    await prisma.contentItem.update({
+      where: { id: params.contentId },
+      data: {
+        storageKey: version.storageKey,
+        ...(version.snapshot ? { metadata: version.snapshot as any } : {}),
+      },
+    });
+
+    await prisma.activityLog.create({
+      data: {
+        roomId: contentItem.roomId,
+        actorId: auth.userId,
+        action: 'rollback_version',
+        targetType: 'content',
+        targetId: contentItem.id,
+        metadata: { filename: contentItem.title, version: version.versionNumber },
+      },
+    });
+
+    return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  // Search & Activity Log Routes
+  app.get('/api/v1/rooms/:roomId/search', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    const query = z.object({
+      q: z.string().default(''),
+      type: z.string().optional(),
+      folderId: z.string().uuid().nullable().optional(),
+      tagId: z.string().uuid().optional(),
+    }).parse(request.query);
+
+    await requireRoomRole(auth.userId, params.roomId, 'viewer');
+
+    const whereClause: Prisma.ContentItemWhereInput = {
+      roomId: params.roomId,
+      isDeleted: false,
+      ...(query.type ? { type: query.type as any } : {}),
+      ...(query.folderId !== undefined ? { folderId: query.folderId } : {}),
+      ...(query.tagId ? { tags: { some: { tagId: query.tagId } } } : {}),
+      ...(query.q ? {
+        OR: [
+          { title: { contains: query.q, mode: 'insensitive' } },
+          { storageKey: { contains: query.q, mode: 'insensitive' } },
+        ]
+      } : {}),
+    };
+
+    const items = await prisma.contentItem.findMany({
+      where: whereClause,
+      include: {
+        tags: {
+          include: {
+            tag: true
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return sendSuccess(reply, items.map(serializeContentItem), 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.get('/api/v1/rooms/:roomId/activity', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    await requireRoomRole(auth.userId, params.roomId, 'viewer');
+
+    const logs = await prisma.activityLog.findMany({
+      where: { roomId: params.roomId },
+      include: { actor: { select: { displayName: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+
+    return sendSuccess(reply, logs.map(l => ({
+      id: l.id,
+      roomId: l.roomId,
+      actorId: l.actorId,
+      actor: { displayName: l.actor.displayName },
+      action: l.action,
+      targetType: l.targetType,
+      targetId: l.targetId,
+      metadata: l.metadata,
+      createdAt: l.createdAt.toISOString(),
+    })), 200, buildRequestMeta(request, 'v1'));
   });
 }

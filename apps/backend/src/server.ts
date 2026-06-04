@@ -3,6 +3,9 @@ import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { z } from 'zod';
+import path from 'node:path';
+import fs from 'node:fs';
+import fastifyStatic from '@fastify/static';
 import { loadEnvironment } from './config/env';
 import { AppError, buildRequestMeta, normalizeError, sendError, sendSuccess } from './lib/http';
 import { registerAuthRoutes } from './modules/auth/auth.routes';
@@ -48,6 +51,15 @@ async function start(): Promise<void> {
   await app.register(helmet, {
     global: true,
     contentSecurityPolicy: false,
+  });
+
+  // Ensure uploads directory exists for static serving
+  fs.mkdirSync(path.join(process.cwd(), 'uploads'), { recursive: true });
+
+  await app.register(fastifyStatic, {
+    root: path.join(process.cwd(), 'uploads'),
+    prefix: '/uploads/',
+    decorateReply: false,
   });
 
   const requestStartTimes = new WeakMap<object, number>();

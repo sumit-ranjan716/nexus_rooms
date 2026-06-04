@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { authService } from '../services/authService';
 
@@ -6,6 +6,7 @@ function VerifyEmail(): JSX.Element {
   const [params] = useSearchParams();
   const [message, setMessage] = useState('Verifying your email...');
   const token = params.get('token');
+  const calledRef = useRef(false);
 
   useEffect(() => {
     const verify = async (): Promise<void> => {
@@ -13,6 +14,9 @@ function VerifyEmail(): JSX.Element {
         setMessage('Missing verification token.');
         return;
       }
+
+      if (calledRef.current) return;
+      calledRef.current = true;
 
       try {
         const response = await authService.verifyEmail(token);

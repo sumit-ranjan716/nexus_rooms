@@ -42,9 +42,44 @@ export const useAuthStore = create<AuthState>((set) => ({
 interface UIState {
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
+  theme: 'light' | 'dark';
+  setTheme: (theme: 'light' | 'dark') => void;
+  toggleTheme: () => void;
 }
+
+const getInitialTheme = (): 'light' | 'dark' => {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const stored = window.localStorage.getItem('theme');
+    if (stored === 'light' || stored === 'dark') {
+      return stored;
+    }
+  }
+  return 'light'; // lavender white blend as requested
+};
 
 export const useUIStore = create<UIState>((set) => ({
   sidebarOpen: true,
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
+  theme: getInitialTheme(),
+  setTheme: (theme) => {
+    localStorage.setItem('theme', theme);
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    set({ theme });
+  },
+  toggleTheme: () => {
+    set((state) => {
+      const nextTheme = state.theme === 'light' ? 'dark' : 'light';
+      localStorage.setItem('theme', nextTheme);
+      if (nextTheme === 'dark') {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+      return { theme: nextTheme };
+    });
+  },
 }));

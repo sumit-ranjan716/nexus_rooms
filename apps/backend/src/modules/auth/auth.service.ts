@@ -104,6 +104,14 @@ export async function signupUser(params: {
     },
   });
 
+  // Print email verification link directly in the console for local development
+  console.log(`
+  ========================================================================
+  ✉️  [LOCAL DEV] EMAIL VERIFICATION INBOX SIMULATION FOR: ${email}
+  👉 Verification Link: http://localhost:5173/verify-email?token=${token}
+  ========================================================================
+  `);
+
   return {
     user: serializeUser(user),
     message: 'Verification email sent. Please verify your email before logging in.',
@@ -308,6 +316,14 @@ export async function requestPasswordReset(params: {
       expiresAt: createExpiresAt(PASSWORD_RESET_TOKEN_EXPIRY_MS),
     },
   });
+
+  // Print password reset link directly in the console for local development
+  console.log(`
+  ========================================================================
+  ✉️  [LOCAL DEV] PASSWORD RESET INBOX SIMULATION FOR: ${email}
+  👉 Reset Password Link: http://localhost:5173/reset-password?token=${token}
+  ========================================================================
+  `);
 
   return {
     message: 'If the account exists, a password reset email has been sent',
