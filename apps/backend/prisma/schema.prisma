@@ -47,6 +47,7 @@ model User {
   comments                Comment[]
   notifications           Notification[]
   activities              ActivityLog[]
+  joinRequests            JoinRequest[]
 
   @@map("users")
 }
@@ -71,6 +72,8 @@ model Room {
   tags              Tag[]
   notifications     Notification[]
   activities        ActivityLog[]
+  isApprovalRequired Boolean      @default(false)
+  joinRequests      JoinRequest[]
 
   @@index([createdBy])
   @@index([slug])
@@ -321,3 +324,20 @@ model ActivityLog {
   @@index([roomId, createdAt])
   @@map("activity_log")
 }
+
+model JoinRequest {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId    String   @db.Uuid
+  userId    String   @db.Uuid
+  status    String   @db.VarChar(20) // "pending", "approved", "declined"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([roomId, status])
+  @@map("join_requests")
+}
+

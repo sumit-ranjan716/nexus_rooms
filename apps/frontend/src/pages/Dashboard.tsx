@@ -1,7 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
 import { useEffect, useMemo, useState, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { apiClient } from '@nexus/api-client';
-import type { ContentItem, Room, Folder, Tag, Comment, ContentVersion, ActivityLog } from '@nexus/types';
+import type { ContentItem, Room, Folder, Tag, Comment, ContentVersion, ActivityLog, RoomMember, InviteLink } from '@nexus/types';
+import { useAuthStore } from '../store';
+
 export default function Dashboard(): JSX.Element {
 
   // Core Room State
@@ -13,6 +16,32 @@ export default function Dashboard(): JSX.Element {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [activity, setActivity] = useState<ActivityLog[]>([]);
+
+  // Search Parameters
+  const [searchParams] = useSearchParams();
+
+  // Auth Store
+  const currentUserId = useAuthStore((state) => state.userId);
+
+  // Settings & Members State
+  const [members, setMembers] = useState<RoomMember[]>([]);
+  const [inviteLinks, setInviteLinks] = useState<InviteLink[]>([]);
+  const [rightPanelTab, setRightPanelTab] = useState<'activity' | 'share'>('activity');
+
+  // Direct Join & Lookup States
+  const [joinRoomInput, setJoinRoomInput] = useState('');
+  const [joinPassword, setJoinPassword] = useState('');
+  const [joiningRoom, setJoiningRoom] = useState(false);
+  const [searchingRoom, setSearchingRoom] = useState(false);
+  const [roomLookup, setRoomLookup] = useState<any | null>(null);
+  const [joinRequests, setJoinRequests] = useState<any[]>([]);
+
+  // Invite Form & Room Options State
+  const [isApprovalRequired, setIsApprovalRequired] = useState(false);
+  const [inviteRole, setInviteRole] = useState<'admin' | 'editor' | 'viewer'>('viewer');
+  const [inviteExpiresIn, setInviteExpiresIn] = useState<'24h' | '7d' | '30d' | 'never'>('7d');
+  const [inviteSingleUse, setInviteSingleUse] = useState(false);
+  const [generatingInvite, setGeneratingInvite] = useState(false);
 
   // Selected Item Detail State (Drawer)
   const [activeItem, setActiveItem] = useState<ContentItem | null>(null);
@@ -46,6 +75,12 @@ export default function Dashboard(): JSX.Element {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [activeTab, setActiveTab] = useState<'comments' | 'versions'>('comments');
 
+  // Mobile Collapsible Panels States (default to true: collapsed on mobile/tablet viewports)
+  const [roomsCollapsed, setRoomsCollapsed] = useState(true);
+  const [createCollapsed, setCreateCollapsed] = useState(true);
+  const [joinCollapsed, setJoinCollapsed] = useState(true);
+  const [tagsCollapsed, setTagsCollapsed] = useState(true);
+
   // Drag and Drop State
   const [isDragging, setIsDragging] = useState(false);
 
@@ -60,12 +95,176 @@ export default function Dashboard(): JSX.Element {
     [rooms, selectedRoomId]
   );
 
+  const isCurrentUserAdmin = useMemo(() => {
+    if (!selectedRoom) return false;
+    if (selectedRoom.createdBy === currentUserId) return true;
+    const selfMember = members.find(m => m.userId === currentUserId);
+    return selfMember?.role === 'admin';
+  }, [selectedRoom, members, currentUserId]);
+
+  const isCurrentUserEditor = useMemo(() => {
+    if (!selectedRoom) return false;
+    if (selectedRoom.createdBy === currentUserId) return true;
+    const selfMember = members.find(m => m.userId === currentUserId);
+    return selfMember?.role === 'admin' || selfMember?.role === 'editor';
+  }, [selectedRoom, members, currentUserId]);
+
+  // Load members, invites and pending join requests
+  async function loadRoomSettings(roomId: string) {
+    try {
+      const membersData = await apiClient.getRoomMembers(roomId);
+      setMembers(membersData);
+      
+      try {
+        const invitesData = await apiClient.getInviteLinks(roomId);
+        setInviteLinks(invitesData);
+      } catch (err) {
+        setInviteLinks([]);
+      }
+
+      // Check if user is admin/editor to retrieve pending requests
+      const selfMember = membersData.find(m => m.userId === currentUserId);
+      const isAdminOrEditor = selfMember?.role === 'admin' || selfMember?.role === 'editor';
+      
+      if (isAdminOrEditor || roomId === selectedRoom?.createdBy) {
+        try {
+          const requests = await apiClient.getPendingJoinRequests(roomId);
+          setJoinRequests(requests);
+        } catch (err) {
+          setJoinRequests([]);
+        }
+      } else {
+        setJoinRequests([]);
+      }
+    } catch (err) {
+      console.error("Failed loading room members/settings", err);
+    }
+  }
+
+  // Room search lookup handler
+  async function handleSearchRoom() {
+    if (!joinRoomInput.trim()) return;
+    setSearchingRoom(true);
+    setRoomLookup(null);
+    setStatus('Looking up room details...');
+    try {
+      const data = await apiClient.lookupRoom(joinRoomInput.trim());
+      setRoomLookup(data);
+      setStatus('');
+    } catch (err: any) {
+      setRoomLookup(null);
+      setStatus(`Room lookup failed: ${err.message || 'Not found'}`);
+    } finally {
+      setSearchingRoom(false);
+    }
+  }
+
+  // Join direct handler (processes open joins or join requests)
+  async function handleJoinRoomDirect() {
+    if (!roomLookup) return;
+    setJoiningRoom(true);
+    setStatus(roomLookup.isApprovalRequired ? 'Submitting join request...' : 'Joining room...');
+    try {
+      const result = await apiClient.joinRoomDirect(roomLookup.roomId, joinPassword ? joinPassword : undefined);
+      setJoinPassword('');
+      if (result.status === 'pending') {
+        setStatus('Join request submitted! Pending owner approval.');
+        await handleSearchRoom();
+      } else {
+        setStatus('Joined room successfully!');
+        setJoinRoomInput('');
+        setRoomLookup(null);
+        await loadRooms();
+        setSelectedRoomId(result.roomId);
+      }
+    } catch (err: any) {
+      setStatus(`Failed to join: ${err.message}`);
+    } finally {
+      setJoiningRoom(false);
+    }
+  }
+
+  // Approve / Decline request handler
+  async function handleJoinRequestAction(requestId: string, action: 'approve' | 'decline') {
+    if (!selectedRoomId) return;
+    setStatus(`${action === 'approve' ? 'Approving' : 'Declining'} request...`);
+    try {
+      await apiClient.handleJoinRequestAction(selectedRoomId, requestId, action);
+      setStatus(`Request ${action}d successfully!`);
+      await loadRoomDetails(selectedRoomId);
+    } catch (err: any) {
+      setStatus(`Action failed: ${err.message}`);
+    }
+  }
+
+  // Generate Invite
+  async function handleGenerateInvite() {
+    if (!selectedRoomId) return;
+    setGeneratingInvite(true);
+    try {
+      await apiClient.generateInviteLink(selectedRoomId, {
+        role: inviteRole,
+        expiresIn: inviteExpiresIn,
+        isSingleUse: inviteSingleUse,
+      });
+      setStatus('Invite link generated!');
+      const invitesData = await apiClient.getInviteLinks(selectedRoomId);
+      setInviteLinks(invitesData);
+    } catch (err: any) {
+      setStatus(`Failed to generate invite: ${err.message}`);
+    } finally {
+      setGeneratingInvite(false);
+    }
+  }
+
+  // Revoke Invite
+  async function handleRevokeInvite(inviteId: string) {
+    if (!selectedRoomId) return;
+    try {
+      await apiClient.revokeInviteLink(selectedRoomId, inviteId);
+      setStatus('Invite link revoked.');
+      const invitesData = await apiClient.getInviteLinks(selectedRoomId);
+      setInviteLinks(invitesData);
+    } catch (err: any) {
+      setStatus(`Failed to revoke invite: ${err.message}`);
+    }
+  }
+
+  // Update Member Role
+  async function handleUpdateMemberRole(userId: string, role: 'admin' | 'editor' | 'viewer') {
+    if (!selectedRoomId) return;
+    try {
+      await apiClient.updateMemberRole(selectedRoomId, userId, role);
+      setStatus('Member role updated.');
+      const membersData = await apiClient.getRoomMembers(selectedRoomId);
+      setMembers(membersData);
+    } catch (err: any) {
+      setStatus(`Failed to update role: ${err.message}`);
+    }
+  }
+
+  // Remove Member
+  async function handleRemoveMember(userId: string) {
+    if (!selectedRoomId || !confirm('Are you sure you want to remove this member?')) return;
+    try {
+      await apiClient.removeMember(selectedRoomId, userId);
+      setStatus('Member removed.');
+      const membersData = await apiClient.getRoomMembers(selectedRoomId);
+      setMembers(membersData);
+    } catch (err: any) {
+      setStatus(`Failed to remove member: ${err.message}`);
+    }
+  }
+
   // 1. Initial Data Fetching
   async function loadRooms(): Promise<void> {
     try {
       const data = await apiClient.getRooms();
       setRooms(data);
-      if (!selectedRoomId && data.length > 0) {
+      const queryRoomId = searchParams.get('roomId');
+      if (queryRoomId && data.some((r) => r.id === queryRoomId)) {
+        setSelectedRoomId(queryRoomId);
+      } else if (!selectedRoomId && data.length > 0) {
         setSelectedRoomId(data[0].id);
       }
     } catch (e) {
@@ -86,6 +285,8 @@ export default function Dashboard(): JSX.Element {
 
       const activityData = await apiClient.getActivityLog(roomId);
       setActivity(activityData);
+
+      await loadRoomSettings(roomId);
     } catch (e) {
       setStatus('Failed loading room assets.');
     }
@@ -210,6 +411,91 @@ export default function Dashboard(): JSX.Element {
         const comment = JSON.parse(e.data) as Comment;
         if (activeItemRef.current && activeItemRef.current.id === comment.contentItemId) {
           loadComments(comment.contentItemId);
+        }
+        apiClient.getActivityLog(selectedRoomId).then(setActivity);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('MEMBER_JOINED', (e: any) => {
+      try {
+        const member = JSON.parse(e.data);
+        setMembers((prev) => {
+          if (prev.some((x) => x.userId === member.userId)) return prev.map(x => x.userId === member.userId ? member : x);
+          return [...prev, member];
+        });
+        apiClient.getActivityLog(selectedRoomId).then(setActivity);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('MEMBER_UPDATED', (e: any) => {
+      try {
+        const member = JSON.parse(e.data);
+        setMembers((prev) => prev.map((x) => (x.userId === member.userId ? member : x)));
+        apiClient.getActivityLog(selectedRoomId).then(setActivity);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('MEMBER_REMOVED', (e: any) => {
+      try {
+        const data = JSON.parse(e.data);
+        setMembers((prev) => prev.filter((x) => x.userId !== data.userId));
+        apiClient.getActivityLog(selectedRoomId).then(setActivity);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('INVITE_CREATED', (e: any) => {
+      try {
+        const invite = JSON.parse(e.data);
+        setInviteLinks((prev) => {
+          if (prev.some((x) => x.id === invite.id)) return prev;
+          return [invite, ...prev];
+        });
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('INVITE_REVOKED', (e: any) => {
+      try {
+        const data = JSON.parse(e.data);
+        setInviteLinks((prev) => prev.map((x) => (x.id === data.id ? { ...x, isRevoked: true } : x)));
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('INVITE_REVOKED_ALL', () => {
+      setInviteLinks((prev) => prev.map((x) => ({ ...x, isRevoked: true })));
+    });
+
+    es.addEventListener('JOIN_REQUEST_CREATED', (e: any) => {
+      try {
+        const req = JSON.parse(e.data);
+        setJoinRequests((prev) => {
+          if (prev.some((x) => x.id === req.id)) return prev;
+          return [...prev, req];
+        });
+        apiClient.getActivityLog(selectedRoomId).then(setActivity);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    es.addEventListener('JOIN_REQUEST_UPDATED', (e: any) => {
+      try {
+        const data = JSON.parse(e.data);
+        setJoinRequests((prev) => prev.filter((x) => x.id !== data.id));
+        if (data.userId === currentUserId && data.status === 'approved') {
+          loadRooms();
+          setStatus('Your join request was approved!');
         }
         apiClient.getActivityLog(selectedRoomId).then(setActivity);
       } catch (err) {
@@ -530,37 +816,59 @@ export default function Dashboard(): JSX.Element {
               </svg>
               Workspace Rooms
             </h2>
+            <button
+              onClick={() => setRoomsCollapsed(!roomsCollapsed)}
+              className="lg:hidden p-1.5 hover:bg-secondary/50 rounded-lg text-muted-foreground hover:text-foreground transition"
+              aria-label="Toggle Rooms List"
+            >
+              <svg className={`w-4 h-4 transform transition-transform duration-200 ${roomsCollapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
           </div>
           
-          <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar pr-1">
-            {rooms.map((room) => (
-              <button
-                key={room.id}
-                onClick={() => setSelectedRoomId(room.id)}
-                className={`w-full text-left p-3.5 rounded-xl border transition-all duration-200 group relative ${
-                  selectedRoomId === room.id
-                    ? 'border-primary/40 bg-primary/10 text-foreground font-semibold shadow-sm'
-                    : 'border-border bg-card/40 text-muted-foreground hover:text-foreground hover:bg-secondary/40'
-                }`}
-              >
-                <div className="font-medium truncate group-hover:translate-x-1 transition-transform duration-200">
-                  {room.name}
-                </div>
-                <div className="text-xs mt-1 text-muted-foreground/80 font-normal">
-                  {room.memberCount} members
-                </div>
-              </button>
-            ))}
-            {rooms.length === 0 && (
-              <p className="text-sm text-muted-foreground text-center py-4">No rooms created yet.</p>
-            )}
+          <div className={`${roomsCollapsed ? 'hidden' : 'block'} lg:block`}>
+            <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar pr-1">
+              {rooms.map((room) => (
+                <button
+                  key={room.id}
+                  onClick={() => setSelectedRoomId(room.id)}
+                  className={`w-full text-left p-3.5 rounded-xl border transition-all duration-200 group relative ${
+                    selectedRoomId === room.id
+                      ? 'border-primary/40 bg-primary/10 text-foreground font-semibold shadow-sm'
+                      : 'border-border bg-card/40 text-muted-foreground hover:text-foreground hover:bg-secondary/40'
+                  }`}
+                >
+                  <div className="font-medium truncate group-hover:translate-x-1 transition-transform duration-200">
+                    {room.name}
+                  </div>
+                  <div className="text-xs mt-1 text-muted-foreground/80 font-normal">
+                    {room.memberCount} members
+                  </div>
+                </button>
+              ))}
+              {rooms.length === 0 && (
+                <p className="text-sm text-muted-foreground text-center py-4">No rooms created yet.</p>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Create Room Form */}
         <div className="glass rounded-2xl border border-border p-5 shadow-sm">
-          <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-4">Create New Room</h3>
-          <div className="space-y-3.5">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Create New Room</h3>
+            <button
+              onClick={() => setCreateCollapsed(!createCollapsed)}
+              className="lg:hidden p-1.5 hover:bg-secondary/50 rounded-lg text-muted-foreground hover:text-foreground transition"
+              aria-label="Toggle Create Room Form"
+            >
+              <svg className={`w-4 h-4 transform transition-transform duration-200 ${createCollapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+          </div>
+          <div className={`${createCollapsed ? 'hidden' : 'block'} lg:block space-y-3.5`}>
             <input
               value={roomName}
               onChange={(e) => setRoomName(e.target.value)}
@@ -574,15 +882,32 @@ export default function Dashboard(): JSX.Element {
               className="w-full text-sm rounded-xl border border-border px-3.5 py-2.5 bg-background text-foreground focus:ring-1 focus:ring-primary focus:outline-none transition resize-none"
               rows={2}
             />
+            <div className="flex items-center justify-between py-1 px-1">
+              <label htmlFor="create-room-approval" className="text-xs text-muted-foreground font-semibold">Require Approval to Join</label>
+              <input
+                id="create-room-approval"
+                type="checkbox"
+                checked={isApprovalRequired}
+                onChange={(e) => setIsApprovalRequired(e.target.checked)}
+                className="rounded border-border bg-background text-primary focus:ring-primary w-3.5 h-3.5 cursor-pointer"
+              />
+            </div>
             <button
               onClick={async () => {
                 if (!roomName.trim()) return;
                 try {
-                  await apiClient.createRoom({ name: roomName.trim(), description: roomDescription.trim() || undefined });
+                  const newRoom = await apiClient.createRoom({
+                    name: roomName.trim(),
+                    description: roomDescription.trim() || undefined,
+                    isApprovalRequired,
+                  });
                   setRoomName('');
                   setRoomDescription('');
+                  setIsApprovalRequired(false);
                   await loadRooms();
-                  setStatus('Workspace expanded!');
+                  setSelectedRoomId(newRoom.id);
+                  setRightPanelTab('share');
+                  setStatus('Room created successfully!');
                 } catch (e) {
                   setStatus('Failed creating room.');
                 }
@@ -594,60 +919,173 @@ export default function Dashboard(): JSX.Element {
           </div>
         </div>
 
+        {/* Join Room Form */}
+        <div className="glass rounded-2xl border border-border p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Join Room with ID / Slug</h3>
+            <button
+              onClick={() => setJoinCollapsed(!joinCollapsed)}
+              className="lg:hidden p-1.5 hover:bg-secondary/50 rounded-lg text-muted-foreground hover:text-foreground transition"
+              aria-label="Toggle Join Room Form"
+            >
+              <svg className={`w-4 h-4 transform transition-transform duration-200 ${joinCollapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+          </div>
+          <div className={`${joinCollapsed ? 'hidden' : 'block'} lg:block space-y-4`}>
+            <div className="flex gap-2">
+              <input
+                value={joinRoomInput}
+                onChange={(e) => {
+                  setJoinRoomInput(e.target.value);
+                  setRoomLookup(null);
+                }}
+                placeholder="Room ID or Slug"
+                className="flex-1 text-sm rounded-xl border border-border px-3 py-2 bg-background text-foreground focus:ring-1 focus:ring-primary focus:outline-none transition"
+                disabled={searchingRoom || joiningRoom}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearchRoom()}
+              />
+              <button
+                onClick={handleSearchRoom}
+                disabled={searchingRoom || joiningRoom || !joinRoomInput.trim()}
+                className="px-3 py-2 text-xs font-semibold bg-secondary rounded-xl text-foreground hover:bg-secondary-foreground/10 transition shrink-0"
+              >
+                {searchingRoom ? '...' : 'Search'}
+              </button>
+            </div>
+
+            {roomLookup && (
+              <div className="bg-secondary/15 p-4 rounded-2xl border border-border space-y-3 animate-fadeIn text-xs">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <h4 className="font-bold text-foreground truncate max-w-[140px]" title={roomLookup.name}>
+                      {roomLookup.name}
+                    </h4>
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold border ${
+                      roomLookup.isApprovalRequired
+                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                        : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    }`}>
+                      {roomLookup.isApprovalRequired ? 'Approval-Basis' : 'Open Room'}
+                    </span>
+                  </div>
+                  {roomLookup.description && (
+                    <p className="text-muted-foreground text-[10px] line-clamp-2">{roomLookup.description}</p>
+                  )}
+                </div>
+
+                {roomLookup.membershipStatus === 'member' ? (
+                  <div className="text-center font-semibold text-emerald-400 py-1 border border-emerald-500/20 bg-emerald-500/5 rounded-xl">
+                    Already a Member
+                  </div>
+                ) : roomLookup.membershipStatus === 'pending_approval' ? (
+                  <div className="text-center font-semibold text-amber-400 py-1 border border-amber-500/20 bg-amber-500/5 rounded-xl animate-pulse">
+                    Approval Request Pending
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {roomLookup.hasPassword && (
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-muted-foreground font-semibold">Enter Password</label>
+                        <input
+                          type="password"
+                          value={joinPassword}
+                          onChange={(e) => setJoinPassword(e.target.value)}
+                          placeholder="Room Password Required"
+                          className="w-full text-xs rounded-xl border border-border px-3 py-2 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                          disabled={joiningRoom}
+                        />
+                      </div>
+                    )}
+                    <button
+                      onClick={handleJoinRoomDirect}
+                      disabled={joiningRoom}
+                      className="w-full text-xs font-semibold rounded-xl bg-primary text-primary-foreground py-2 hover:scale-[1.02] active:scale-[0.98] transition"
+                    >
+                      {joiningRoom
+                        ? 'Processing...'
+                        : roomLookup.isApprovalRequired
+                          ? 'Request to Join'
+                          : 'Join Room'
+                      }
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Room Tags */}
         {selectedRoomId && (
           <div className="glass rounded-2xl border border-border p-5 shadow-sm">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-3.5 flex items-center justify-between">
-              <span>Tags</span>
-              {selectedTagId && (
-                <button onClick={() => setSelectedTagId(null)} className="text-xs text-primary hover:underline">
-                  Clear
-                </button>
-              )}
-            </h3>
-            
-            {/* Tag List */}
-            <div className="flex flex-wrap gap-2 mb-4">
-              {tags.map((tag) => (
-                <button
-                  key={tag.id}
-                  onClick={() => setSelectedTagId(selectedTagId === tag.id ? null : tag.id)}
-                  style={{ backgroundColor: selectedTagId === tag.id ? tag.color : undefined, borderColor: tag.color }}
-                  className={`text-xs px-2.5 py-1 rounded-full border transition-all duration-200 ${
-                    selectedTagId === tag.id
-                      ? 'text-white font-medium border-transparent scale-105 shadow-sm'
-                      : 'text-foreground/80 hover:bg-secondary'
-                  }`}
-                >
-                  <span className="w-2 h-2 rounded-full inline-block mr-1.5" style={{ backgroundColor: selectedTagId === tag.id ? 'white' : tag.color }}></span>
-                  {tag.name}
-                </button>
-              ))}
-              {tags.length === 0 && <span className="text-xs text-muted-foreground">No tags defined yet.</span>}
-            </div>
-
-            {/* Create Tag */}
-            <div className="space-y-2 border-t border-border pt-4">
-              <div className="flex gap-2">
-                <input
-                  value={tagName}
-                  onChange={(e) => setTagName(e.target.value)}
-                  placeholder="New tag name"
-                  className="flex-1 text-xs rounded-xl border border-border px-3 py-2 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-                />
-                <input
-                  type="color"
-                  value={tagColor}
-                  onChange={(e) => setTagColor(e.target.value)}
-                  className="w-8 h-8 p-0.5 rounded-lg border border-border cursor-pointer bg-background"
-                />
-              </div>
+            <div className="flex items-center justify-between mb-3.5">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                <span>Tags</span>
+                {selectedTagId && (
+                  <button onClick={() => setSelectedTagId(null)} className="text-xs text-primary hover:underline font-normal capitalize">
+                    (Clear)
+                  </button>
+                )}
+              </h3>
               <button
-                onClick={handleCreateTag}
-                className="w-full text-xs font-semibold rounded-lg bg-secondary text-foreground hover:bg-secondary-foreground/10 py-2 transition"
+                onClick={() => setTagsCollapsed(!tagsCollapsed)}
+                className="lg:hidden p-1.5 hover:bg-secondary/50 rounded-lg text-muted-foreground hover:text-foreground transition"
+                aria-label="Toggle Tags List"
               >
-                Create Tag
+                <svg className={`w-4 h-4 transform transition-transform duration-200 ${tagsCollapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
               </button>
+            </div>
+            
+            <div className={`${tagsCollapsed ? 'hidden' : 'block'} lg:block space-y-4`}>
+              {/* Tag List */}
+              <div className="flex flex-wrap gap-2">
+                {tags.map((tag) => (
+                  <button
+                    key={tag.id}
+                    onClick={() => setSelectedTagId(selectedTagId === tag.id ? null : tag.id)}
+                    style={{ backgroundColor: selectedTagId === tag.id ? tag.color : undefined, borderColor: tag.color }}
+                    className={`text-xs px-2.5 py-1 rounded-full border transition-all duration-200 ${
+                      selectedTagId === tag.id
+                        ? 'text-white font-medium border-transparent scale-105 shadow-sm'
+                        : 'text-foreground/80 hover:bg-secondary'
+                    }`}
+                  >
+                    <span className="w-2 h-2 rounded-full inline-block mr-1.5" style={{ backgroundColor: selectedTagId === tag.id ? 'white' : tag.color }}></span>
+                    {tag.name}
+                  </button>
+                ))}
+                {tags.length === 0 && <span className="text-xs text-muted-foreground">No tags defined yet.</span>}
+              </div>
+
+              {/* Create Tag */}
+              {isCurrentUserEditor && (
+                <div className="space-y-2 border-t border-border pt-4">
+                  <div className="flex gap-2">
+                    <input
+                      value={tagName}
+                      onChange={(e) => setTagName(e.target.value)}
+                      placeholder="New tag name"
+                      className="flex-1 text-xs rounded-xl border border-border px-3 py-2 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <input
+                      type="color"
+                      value={tagColor}
+                      onChange={(e) => setTagColor(e.target.value)}
+                      className="w-8 h-8 p-0.5 rounded-lg border border-border cursor-pointer bg-background"
+                    />
+                  </div>
+                  <button
+                    onClick={handleCreateTag}
+                    className="w-full text-xs font-semibold rounded-lg bg-secondary text-foreground hover:bg-secondary-foreground/10 py-2 transition"
+                  >
+                    Create Tag
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -666,23 +1104,93 @@ export default function Dashboard(): JSX.Element {
                   {selectedRoom.description && (
                     <p className="text-sm text-muted-foreground mt-1">{selectedRoom.description}</p>
                   )}
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 mt-2.5 text-[10px] text-muted-foreground">
+                    <span className="bg-secondary/40 border border-border px-1.5 py-0.5 rounded font-mono text-slate-300 select-none">
+                      ID: <span className="font-semibold select-all">{selectedRoom.id}</span>
+                    </span>
+                    <span className="bg-secondary/40 border border-border px-1.5 py-0.5 rounded font-mono text-slate-300 select-none">
+                      Slug: <span className="font-semibold select-all">{selectedRoom.slug}</span>
+                    </span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedRoom.id);
+                        setStatus('Copied Room ID!');
+                      }}
+                      className="text-primary hover:underline font-semibold"
+                    >
+                      Copy ID
+                    </button>
+                    <span className="text-muted-foreground/30">•</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedRoom.slug);
+                        setStatus('Copied Room Slug!');
+                      }}
+                      className="text-primary hover:underline font-semibold"
+                    >
+                      Copy Slug
+                    </button>
+
+                    {inviteLinks.find(i => !i.isRevoked) ? (
+                      <>
+                        <span className="text-muted-foreground/30">•</span>
+                        <button
+                          onClick={() => {
+                            const activeLink = inviteLinks.find(i => !i.isRevoked);
+                            if (activeLink) {
+                              navigator.clipboard.writeText(activeLink.url);
+                              setStatus('Copied Invite Link!');
+                            }
+                          }}
+                          className="text-primary hover:underline font-semibold"
+                        >
+                          🔗 Copy Invite Link
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-muted-foreground/30">•</span>
+                        <button
+                          onClick={async () => {
+                            try {
+                              const newInvite = await apiClient.generateInviteLink(selectedRoom.id, {
+                                role: 'viewer',
+                                expiresIn: 'never',
+                                isSingleUse: false,
+                              });
+                              setInviteLinks(prev => [newInvite, ...prev]);
+                              navigator.clipboard.writeText(newInvite.url);
+                              setStatus('Generated and Copied Invite Link!');
+                            } catch (e) {
+                              setStatus('Failed to generate invite link.');
+                            }
+                          }}
+                          className="text-primary hover:underline font-semibold"
+                        >
+                          ✨ Generate Invite Link
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <button
-                  onClick={async () => {
-                    if (!confirm('Are you sure you want to delete this workspace room?')) return;
-                    try {
-                      await apiClient.deleteRoom(selectedRoom.id);
-                      setSelectedRoomId('');
-                      await loadRooms();
-                      setStatus('Room deleted.');
-                    } catch (e) {
-                      setStatus('Delete room failed.');
-                    }
-                  }}
-                  className="text-xs font-medium bg-destructive/10 text-destructive border border-destructive/20 rounded-xl px-3 py-1.5 hover:bg-destructive hover:text-white transition duration-200"
-                >
-                  Delete Room
-                </button>
+                {isCurrentUserAdmin && (
+                  <button
+                    onClick={async () => {
+                      if (!confirm('Are you sure you want to delete this workspace room?')) return;
+                      try {
+                        await apiClient.deleteRoom(selectedRoom.id);
+                        setSelectedRoomId('');
+                        await loadRooms();
+                        setStatus('Room deleted.');
+                      } catch (e) {
+                        setStatus('Delete room failed.');
+                      }
+                    }}
+                    className="text-xs font-medium bg-destructive/10 text-destructive border border-destructive/20 rounded-xl px-3 py-1.5 hover:bg-destructive hover:text-white transition duration-200"
+                  >
+                    Delete Room
+                  </button>
+                )}
               </div>
 
               {/* Advanced Search & Filtering Bar */}
@@ -758,121 +1266,131 @@ export default function Dashboard(): JSX.Element {
                       )}
                     </button>
 
-                    <div className="flex items-center gap-1 shrink-0 ml-1">
-                      {editingFolderId === folder.id ? (
-                        <button
-                          onClick={() => handleRenameFolder(folder.id)}
-                          className="p-1 hover:text-emerald-500 transition"
-                        >
-                          ✓
-                        </button>
-                      ) : (
+                    {isCurrentUserEditor && (
+                      <div className="flex items-center gap-1 shrink-0 ml-1">
+                        {editingFolderId === folder.id ? (
+                          <button
+                            onClick={() => handleRenameFolder(folder.id)}
+                            className="p-1 hover:text-emerald-500 transition"
+                          >
+                            ✓
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingFolderId(folder.id);
+                              setNewFolderName(folder.name);
+                            }}
+                            className="text-xs text-muted-foreground hover:text-foreground p-1 transition"
+                            title="Rename Folder"
+                          >
+                            ✎
+                          </button>
+                        )}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setEditingFolderId(folder.id);
-                            setNewFolderName(folder.name);
+                            handleDeleteFolder(folder.id);
                           }}
-                          className="text-xs text-muted-foreground hover:text-foreground p-1 transition"
-                          title="Rename Folder"
+                          className="text-xs text-muted-foreground hover:text-destructive p-1 transition"
+                          title="Delete Folder"
                         >
-                          ✎
+                          ✕
                         </button>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteFolder(folder.id);
-                        }}
-                        className="text-xs text-muted-foreground hover:text-destructive p-1 transition"
-                        title="Delete Folder"
-                      >
-                        ✕
-                      </button>
-                    </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
 
               {/* Create Folder Form */}
-              <div className="flex gap-2 border-t border-border pt-4">
-                <input
-                  value={folderName}
-                  onChange={(e) => setFolderName(e.target.value)}
-                  placeholder="New folder name..."
-                  className="flex-1 text-sm rounded-xl border border-border px-3.5 py-2 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-                />
-                <button
-                  onClick={handleCreateFolder}
-                  className="px-4 py-2 text-xs font-semibold bg-secondary rounded-xl text-foreground hover:bg-secondary-foreground/10 transition"
-                >
-                  Create Folder
-                </button>
-              </div>
-            </div>
-
-            {/* Drag & Drop File Upload Area */}
-            <div
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              className={`border-2 border-dashed rounded-2xl p-6 flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden ${
-                isDragging
-                  ? 'border-primary bg-primary/5 scale-102'
-                  : 'border-border hover:border-primary/50 bg-card/30'
-              }`}
-            >
-              {/* Invisible File Input */}
-              <input
-                type="file"
-                id="file-upload-input"
-                onChange={handleFileSelect}
-                className="hidden"
-                disabled={uploading}
-              />
-              
-              {uploading ? (
-                <div className="space-y-4 w-full text-center py-4">
-                  {/* Rotating Indicator */}
-                  <div className="flex items-center justify-center gap-3">
-                    <div className="w-5 h-5 border-2 border-primary border-t-transparent animate-spin rounded-full"></div>
-                    <span className="text-sm font-semibold text-foreground">
-                      {virusStatus === 'initializing' && 'Preparing upload parameters...'}
-                      {virusStatus === 'scanning' && 'ClamAV Virus Scanning: Analyzing data blocks...'}
-                      {virusStatus === 'clean' && 'ClamAV Scan: [CLEAN] Uploading file to virtual S3...'}
-                      {!virusStatus && 'Uploading and processing file...'}
-                    </span>
-                  </div>
-                  
-                  {/* Progress Bar */}
-                  <div className="w-4/5 mx-auto bg-secondary rounded-full h-2.5 overflow-hidden">
-                    <div
-                      className="bg-primary h-2.5 rounded-full transition-all duration-300 animate-pulse"
-                      style={{ width: `${uploadProgress}%` }}
-                    ></div>
-                  </div>
-                  <span className="text-xs text-muted-foreground">{uploadProgress}% complete</span>
+              {isCurrentUserEditor && (
+                <div className="flex gap-2 border-t border-border pt-4">
+                  <input
+                    value={folderName}
+                    onChange={(e) => setFolderName(e.target.value)}
+                    placeholder="New folder name..."
+                    className="flex-1 text-sm rounded-xl border border-border px-3.5 py-2 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <button
+                    onClick={handleCreateFolder}
+                    className="px-4 py-2 text-xs font-semibold bg-secondary rounded-xl text-foreground hover:bg-secondary-foreground/10 transition"
+                  >
+                    Create Folder
+                  </button>
                 </div>
-              ) : (
-                <label
-                  htmlFor="file-upload-input"
-                  className="cursor-pointer flex flex-col items-center gap-3.5 text-center w-full h-full py-4"
-                >
-                  <div className="w-12 h-12 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-primary group-hover:scale-110 transition duration-300">
-                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-foreground">
-                      Drag & Drop files here, or <span className="text-primary hover:underline">browse files</span>
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Supports uploads up to 10MB. Mock ClamAV scanned automatically.
-                    </p>
-                  </div>
-                </label>
               )}
+                {/* Drag & Drop File Upload Area */}
+             {isCurrentUserEditor ? (
+               <div
+                 onDragOver={handleDragOver}
+                 onDragLeave={handleDragLeave}
+                 onDrop={handleDrop}
+                 className={`border-2 border-dashed rounded-2xl p-6 flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden ${
+                   isDragging
+                     ? 'border-primary bg-primary/5 scale-102'
+                     : 'border-border hover:border-primary/50 bg-card/30'
+                 }`}
+               >
+                 {/* Invisible File Input */}
+                 <input
+                   type="file"
+                   id="file-upload-input"
+                   onChange={handleFileSelect}
+                   className="hidden"
+                   disabled={uploading}
+                 />
+                 
+                 {uploading ? (
+                   <div className="space-y-4 w-full text-center py-4">
+                     {/* Rotating Indicator */}
+                     <div className="flex items-center justify-center gap-3">
+                       <div className="w-5 h-5 border-2 border-primary border-t-transparent animate-spin rounded-full"></div>
+                       <span className="text-sm font-semibold text-foreground">
+                         {virusStatus === 'initializing' && 'Preparing upload parameters...'}
+                         {virusStatus === 'scanning' && 'ClamAV Virus Scanning: Analyzing data blocks...'}
+                         {virusStatus === 'clean' && 'ClamAV Scan: [CLEAN] Uploading file to virtual S3...'}
+                         {!virusStatus && 'Uploading and processing file...'}
+                       </span>
+                     </div>
+                     
+                     {/* Progress Bar */}
+                     <div className="w-4/5 mx-auto bg-secondary rounded-full h-2.5 overflow-hidden">
+                       <div
+                         className="bg-primary h-2.5 rounded-full transition-all duration-300 animate-pulse"
+                         style={{ width: `${uploadProgress}%` }}
+                       ></div>
+                     </div>
+                     <span className="text-xs text-muted-foreground">{uploadProgress}% complete</span>
+                   </div>
+                 ) : (
+                   <label
+                     htmlFor="file-upload-input"
+                     className="cursor-pointer flex flex-col items-center gap-3.5 text-center w-full h-full py-4"
+                   >
+                     <div className="w-12 h-12 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-primary group-hover:scale-110 transition duration-300">
+                       <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                       </svg>
+                     </div>
+                     <div>
+                       <p className="text-sm font-semibold text-foreground">
+                         Drag & Drop files here, or <span className="text-primary hover:underline">browse files</span>
+                       </p>
+                       <p className="text-xs text-muted-foreground mt-1">
+                         Supports uploads up to 10MB. Mock ClamAV scanned automatically.
+                       </p>
+                     </div>
+                   </label>
+                 )}
+               </div>
+             ) : (
+               <div className="border border-dashed border-border rounded-2xl p-6 text-center text-muted-foreground bg-card/10">
+                 <span className="text-2xl mb-2 block">👁️</span>
+                 <p className="text-xs font-semibold">You have read-only (viewer) access to this room.</p>
+               </div>
+             )}
             </div>
 
             {/* Content Explorer Grid */}
@@ -900,15 +1418,17 @@ export default function Dashboard(): JSX.Element {
                         <div className="p-2 bg-secondary/80 rounded-xl">
                           {getFileIcon(item.type)}
                         </div>
-                        <button
-                          onClick={() => handleDeleteContent(item.id)}
-                          className="text-muted-foreground hover:text-destructive p-1.5 rounded-lg hover:bg-destructive/5 transition-colors"
-                          title="Delete file"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
+                        {isCurrentUserEditor && (
+                          <button
+                            onClick={() => handleDeleteContent(item.id)}
+                            className="text-muted-foreground hover:text-destructive p-1.5 rounded-lg hover:bg-destructive/5 transition-colors"
+                            title="Delete file"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        )}
                       </div>
 
                       {/* Info */}
@@ -977,33 +1497,275 @@ export default function Dashboard(): JSX.Element {
         )}
       </div>
 
-      {/* COLUMN 4: Activity Log Feed Panel */}
+      {/* COLUMN 4: Activity Log & Share Panel */}
       <div className="lg:col-span-1">
         {selectedRoomId && (
           <div className="glass rounded-2xl border border-border p-5 shadow-sm space-y-4 h-full min-h-[500px] flex flex-col">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
-              <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-ping"></span>
-              Live Workspace Activity
-            </h3>
             
-            <div className="flex-1 overflow-y-auto max-h-[700px] pr-1 space-y-4 custom-scrollbar text-xs">
-              {activity.map((log) => (
-                <div key={log.id} className="border-l-2 border-primary/30 pl-3.5 py-1.5 transition-all hover:border-primary duration-200">
-                  <p className="font-semibold text-foreground">
-                    {log.actor?.displayName || 'System'}
-                  </p>
-                  <p className="text-muted-foreground mt-0.5">
-                    {log.action.replace(/_/g, ' ').toLowerCase()} <span className="font-medium text-foreground">{log.metadata?.title || log.metadata?.name || ''}</span>
-                  </p>
-                  <p className="text-[10px] text-muted-foreground/80 mt-1">
-                    {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </p>
-                </div>
-              ))}
-              {activity.length === 0 && (
-                <p className="text-xs text-muted-foreground text-center py-10">No activities logged yet.</p>
-              )}
+            {/* Tab selector */}
+            <div className="flex border-b border-border text-xs font-bold uppercase tracking-wider">
+              <button
+                onClick={() => setRightPanelTab('activity')}
+                className={`flex-1 pb-3 text-center border-b-2 transition-all duration-200 ${
+                  rightPanelTab === 'activity' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Activity
+              </button>
+              <button
+                onClick={() => setRightPanelTab('share')}
+                className={`flex-1 pb-3 text-center border-b-2 transition-all duration-200 ${
+                  rightPanelTab === 'share' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Members & Share
+              </button>
             </div>
+
+            {rightPanelTab === 'activity' ? (
+              <div className="flex-1 flex flex-col space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2 mt-2">
+                  <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-ping"></span>
+                  Live Workspace Activity
+                </h3>
+                
+                <div className="flex-1 overflow-y-auto max-h-[600px] pr-1 space-y-4 custom-scrollbar text-xs">
+                  {activity.map((log) => (
+                    <div key={log.id} className="border-l-2 border-primary/30 pl-3.5 py-1.5 transition-all hover:border-primary duration-200">
+                      <p className="font-semibold text-foreground">
+                        {log.actor?.displayName || 'System'}
+                      </p>
+                      <p className="text-muted-foreground mt-0.5 font-normal">
+                        {log.action.replace(/_/g, ' ').toLowerCase()} <span className="font-semibold text-foreground">{(log.metadata as any)?.title || (log.metadata as any)?.name || (log.metadata as any)?.filename || ''}</span>
+                      </p>
+                      <p className="text-[10px] text-muted-foreground/80 mt-1">
+                        {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                    </div>
+                  ))}
+                  {activity.length === 0 && (
+                    <p className="text-xs text-muted-foreground text-center py-10">No activities logged yet.</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 flex flex-col space-y-5 overflow-y-auto max-h-[700px] pr-1 custom-scrollbar text-xs">
+                
+                {/* Room Info: ID & Slug */}
+                <div className="space-y-2 border-b border-border pb-4 mt-2">
+                  <h4 className="font-bold text-slate-400 uppercase tracking-wider text-[10px]">Room Access Codes</h4>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between bg-secondary/30 rounded-xl px-3 py-2 border border-border">
+                      <div className="truncate pr-2">
+                        <span className="text-muted-foreground select-none">ID: </span>
+                        <span className="font-mono text-slate-300 font-semibold">{selectedRoom?.id}</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(selectedRoom?.id || '');
+                          setStatus('Copied Room ID!');
+                        }}
+                        className="text-primary hover:underline font-semibold text-[10px]"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between bg-secondary/30 rounded-xl px-3 py-2 border border-border">
+                      <div className="truncate pr-2">
+                        <span className="text-muted-foreground select-none">Slug: </span>
+                        <span className="font-mono text-slate-300 font-semibold">{selectedRoom?.slug}</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(selectedRoom?.slug || '');
+                          setStatus('Copied Room Slug!');
+                        }}
+                        className="text-primary hover:underline font-semibold text-[10px]"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Pending Join Requests (Visible to Room Owner/Admin) */}
+                {joinRequests.length > 0 && (
+                  <div className="space-y-3 border-b border-border pb-4">
+                    <h4 className="font-bold text-amber-500 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-ping"></span>
+                      Pending Join Requests ({joinRequests.length})
+                    </h4>
+                    <div className="space-y-2">
+                      {joinRequests.map((req) => (
+                        <div key={req.id} className="bg-amber-500/5 border border-amber-500/10 p-2.5 rounded-xl flex items-center justify-between">
+                          <div className="truncate pr-2">
+                            <p className="font-semibold text-foreground truncate">{req.user?.displayName || 'Unknown'}</p>
+                            <p className="text-[10px] text-muted-foreground truncate">{req.user?.email}</p>
+                          </div>
+                          {isCurrentUserAdmin && (
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                onClick={() => handleJoinRequestAction(req.id, 'approve')}
+                                className="text-[10px] bg-emerald-500 text-white font-bold px-2 py-1 rounded-lg hover:bg-emerald-600 transition"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => handleJoinRequestAction(req.id, 'decline')}
+                                className="text-[10px] bg-secondary/80 text-slate-300 font-bold px-2 py-1 rounded-lg hover:bg-secondary transition"
+                              >
+                                Decline
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Member List */}
+                <div className="space-y-3 border-b border-border pb-4">
+                  <h4 className="font-bold text-slate-400 uppercase tracking-wider text-[10px] flex items-center justify-between">
+                    <span>Members ({members.length})</span>
+                  </h4>
+                  <div className="space-y-2">
+                    {members.map((member) => (
+                      <div key={member.id} className="flex items-center justify-between bg-secondary/20 p-2.5 rounded-xl border border-border/50">
+                        <div className="truncate pr-2">
+                          <p className="font-semibold text-foreground truncate">{member.user?.displayName || 'Unknown'}</p>
+                          <p className="text-[10px] text-muted-foreground truncate">{member.user?.email}</p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {isCurrentUserAdmin && member.userId !== currentUserId ? (
+                            <div className="flex items-center gap-1.5">
+                              <select
+                                value={member.role}
+                                onChange={(e) => handleUpdateMemberRole(member.userId, e.target.value as any)}
+                                className="text-[10px] bg-background text-foreground border border-border rounded-lg px-1 py-0.5 focus:outline-none cursor-pointer"
+                              >
+                                <option value="viewer">Viewer</option>
+                                <option value="editor">Editor</option>
+                                <option value="admin">Admin</option>
+                              </select>
+                              <button
+                                onClick={() => handleRemoveMember(member.userId)}
+                                className="text-[10px] text-destructive hover:underline font-semibold"
+                                title="Remove member"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ) : (
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${
+                              member.role === 'admin' 
+                                ? 'bg-red-500/10 text-red-400 border-red-500/20' 
+                                : member.role === 'editor'
+                                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                                  : 'bg-slate-500/10 text-slate-400 border-slate-500/20'
+                            }`}>
+                              {member.role}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Generate Invite Link (visible to editors/admins) */}
+                {isCurrentUserEditor ? (
+                  <>
+                    <div className="space-y-3 border-b border-border pb-4">
+                      <h4 className="font-bold text-slate-400 uppercase tracking-wider text-[10px]">Create Invite Link</h4>
+                      <div className="space-y-3 bg-secondary/10 p-3.5 rounded-xl border border-border/80">
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] text-muted-foreground font-semibold">Grant Role</label>
+                          <select
+                            value={inviteRole}
+                            onChange={(e) => setInviteRole(e.target.value as any)}
+                            className="w-full text-xs bg-background text-foreground border border-border rounded-lg p-2 focus:outline-none"
+                          >
+                            <option value="viewer">Viewer (Read-only)</option>
+                            <option value="editor">Editor (Upload/Create/Edit)</option>
+                            <option value="admin">Admin (Full Control)</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] text-muted-foreground font-semibold">Expires In</label>
+                          <select
+                            value={inviteExpiresIn}
+                            onChange={(e) => setInviteExpiresIn(e.target.value as any)}
+                            className="w-full text-xs bg-background text-foreground border border-border rounded-lg p-2 focus:outline-none"
+                          >
+                            <option value="24h">24 Hours</option>
+                            <option value="7d">7 Days</option>
+                            <option value="30d">30 Days</option>
+                            <option value="never">Never</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <label htmlFor="invite-single-use" className="text-[10px] text-muted-foreground font-semibold">Single Use Only</label>
+                          <input
+                            id="invite-single-use"
+                            type="checkbox"
+                            checked={inviteSingleUse}
+                            onChange={(e) => setInviteSingleUse(e.target.checked)}
+                            className="rounded border-border bg-background text-primary focus:ring-primary w-3.5 h-3.5"
+                          />
+                        </div>
+                        <button
+                          onClick={handleGenerateInvite}
+                          disabled={generatingInvite}
+                          className="w-full text-xs bg-primary text-primary-foreground font-semibold py-2 rounded-lg hover:opacity-90 transition disabled:opacity-50"
+                        >
+                          {generatingInvite ? 'Generating...' : 'Create Link'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Active Invite Links */}
+                    <div className="space-y-3">
+                      <h4 className="font-bold text-slate-400 uppercase tracking-wider text-[10px]">Active Invite Links ({inviteLinks.filter(i => !i.isRevoked).length})</h4>
+                      <div className="space-y-2">
+                        {inviteLinks.filter(i => !i.isRevoked).map((invite) => (
+                          <div key={invite.id} className="bg-secondary/20 p-2.5 rounded-xl border border-border/50 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="font-mono font-semibold text-slate-300 truncate max-w-[120px]">{invite.token}</span>
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 font-bold uppercase">{invite.role}</span>
+                            </div>
+                            <div className="text-[9px] text-muted-foreground flex justify-between">
+                              <span>Expires: {invite.expiresAt ? new Date(invite.expiresAt).toLocaleDateString() : 'Never'}</span>
+                              {invite.isSingleUse && <span>Single Use</span>}
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(invite.url);
+                                  setStatus('Copied Invite Link!');
+                                }}
+                                className="flex-1 text-[10px] bg-secondary/80 hover:bg-secondary border border-border py-1 rounded font-semibold text-center text-foreground"
+                              >
+                                Copy Link
+                              </button>
+                              <button
+                                onClick={() => handleRevokeInvite(invite.id)}
+                                className="text-[10px] text-destructive hover:underline py-1 px-2 font-semibold shrink-0"
+                              >
+                                Revoke
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                        {inviteLinks.filter(i => !i.isRevoked).length === 0 && (
+                          <p className="text-[10px] text-muted-foreground text-center py-4">No active invite links.</p>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1171,7 +1933,7 @@ export default function Dashboard(): JSX.Element {
                       </div>
                       
                       {/* Rollback Trigger */}
-                      {v.versionNumber < versions.length && (
+                      {v.versionNumber < versions.length && isCurrentUserEditor && (
                         <button
                           onClick={() => handleRollback(v.id)}
                           className="text-xs font-semibold bg-amber-500/10 text-amber-600 border border-amber-500/20 rounded-xl px-3 py-2 hover:bg-amber-500 hover:text-white transition duration-200"

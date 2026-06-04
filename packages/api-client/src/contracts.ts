@@ -241,6 +241,49 @@ export const contentVersionResponseSchema = apiSuccessEnvelope(contentVersionSch
 export const versionsResponseSchema = apiSuccessEnvelope(z.array(contentVersionSchema));
 export const activityLogResponseSchema = apiSuccessEnvelope(z.array(activityLogSchema));
 
+const inviteDetailsSchema = z.object({
+  roomId: z.string().uuid(),
+  roomName: z.string(),
+  roomDescription: z.string().nullable(),
+  hasPassword: z.boolean(),
+  role: z.enum(['admin', 'editor', 'viewer']),
+});
+
+export const inviteDetailsResponseSchema = apiSuccessEnvelope(inviteDetailsSchema);
+export const joinDirectResponseSchema = apiSuccessEnvelope(
+  z.object({
+    roomId: z.string().uuid(),
+    status: z.enum(['approved', 'pending']),
+  })
+);
+
+const roomLookupSchema = z.object({
+  roomId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  hasPassword: z.boolean(),
+  isApprovalRequired: z.boolean(),
+  membershipStatus: z.enum(['not_member', 'member', 'pending_approval']),
+});
+
+export const roomLookupResponseSchema = apiSuccessEnvelope(roomLookupSchema);
+
+const joinRequestSchema = z.object({
+  id: z.string().uuid(),
+  roomId: z.string().uuid(),
+  userId: z.string().uuid(),
+  status: z.string(),
+  createdAt: z.string(),
+  user: z
+    .object({
+      displayName: z.string().nullable(),
+      email: z.string().email(),
+    })
+    .optional(),
+});
+
+export const joinRequestsResponseSchema = apiSuccessEnvelope(z.array(joinRequestSchema));
+
 export const requestSchemas = {
   login: z.object({
     email: z.string().email(),
@@ -255,6 +298,7 @@ export const requestSchemas = {
     name: z.string().min(1).max(120),
     description: z.string().max(500).optional(),
     password: z.string().min(8).optional(),
+    isApprovalRequired: z.boolean().optional(),
   }),
   updateRoom: z.object({
     name: z.string().min(1).max(120).optional(),
@@ -337,6 +381,10 @@ export const responseSchemas = {
   versions: versionsResponseSchema,
   activityLog: activityLogResponseSchema,
   contentItemsList: apiSuccessEnvelope(z.array(contentItemSchema)),
+  inviteDetails: inviteDetailsResponseSchema,
+  joinDirect: joinDirectResponseSchema,
+  roomLookup: roomLookupResponseSchema,
+  joinRequests: joinRequestsResponseSchema,
 };
 
 export type ApiResponseSchema = typeof responseSchemas;

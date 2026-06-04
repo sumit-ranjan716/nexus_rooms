@@ -23,6 +23,7 @@ const createRoomBodySchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(500).optional(),
   password: z.string().min(8).max(128).optional(),
+  isApprovalRequired: z.boolean().optional(),
 });
 const updateRoomBodySchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
@@ -89,6 +90,7 @@ function serializeRoom(room: {
   name: string;
   description: string | null;
   passwordHash: string | null;
+  isApprovalRequired: boolean;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -100,6 +102,7 @@ function serializeRoom(room: {
     name: room.name,
     description: room.description,
     hasPassword: Boolean(room.passwordHash),
+    isApprovalRequired: room.isApprovalRequired,
     createdBy: room.createdBy,
     memberCount: room._count.members,
     createdAt: room.createdAt.toISOString(),
@@ -247,7 +250,15 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
         description: body.description ?? null,
         passwordHash,
         createdBy: auth.userId,
+        isApprovalRequired: body.isApprovalRequired ?? false,
         members: { create: { userId: auth.userId, role: 'admin' } },
+        inviteLinks: {
+          create: {
+            token: buildInviteToken(),
+            role: 'viewer',
+            createdBy: auth.userId,
+          }
+        }
       },
       include: { _count: { select: { members: true } } },
     });
@@ -315,6 +326,15 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
       include: { user: { select: { displayName: true, email: true } } },
     });
 
+    broadcastToRoom(params.roomId, 'MEMBER_UPDATED', {
+      id: member.id,
+      roomId: member.roomId,
+      userId: member.userId,
+      role: member.role,
+      joinedAt: member.joinedAt.toISOString(),
+      user: { displayName: member.user.displayName, email: member.user.email },
+    });
+
     return sendSuccess(reply, {
       id: member.id,
       roomId: member.roomId,
@@ -331,6 +351,12 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
     await requireRoomRole(auth.userId, params.roomId, 'admin');
 
     await prisma.roomMember.delete({ where: { roomId_userId: { roomId: params.roomId, userId: params.userId } } });
+
+    broadcastToRoom(params.roomId, 'MEMBER_REMOVED', {
+      roomId: params.roomId,
+      userId: params.userId,
+    });
+
     return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
   });
 
@@ -351,7 +377,10 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
       },
     });
 
-    return sendSuccess(reply, serializeInvite(invite, options.env.APP_URL), 201, buildRequestMeta(request, 'v1'));
+    const serialized = serializeInvite(invite, options.env.APP_URL);
+    broadcastToRoom(params.roomId, 'INVITE_CREATED', serialized);
+
+    return sendSuccess(reply, serialized, 201, buildRequestMeta(request, 'v1'));
   });
 
   app.get('/api/v1/rooms/:roomId/invites', async (request, reply) => {
@@ -373,6 +402,9 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
     await requireRoomRole(auth.userId, params.roomId, 'editor');
 
     await prisma.inviteLink.updateMany({ where: { id: params.inviteId, roomId: params.roomId }, data: { isRevoked: true } });
+
+    broadcastToRoom(params.roomId, 'INVITE_REVOKED', { id: params.inviteId });
+
     return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
   });
 
@@ -382,6 +414,268 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
     await requireRoomRole(auth.userId, params.roomId, 'editor');
 
     await prisma.inviteLink.updateMany({ where: { roomId: params.roomId, isRevoked: false }, data: { isRevoked: true } });
+
+    broadcastToRoom(params.roomId, 'INVITE_REVOKED_ALL', {});
+
+    return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.get('/api/v1/invites/:token', async (request, reply) => {
+    const params = z.object({ token: z.string().min(1) }).parse(request.params);
+
+    const invite = await prisma.inviteLink.findFirst({
+      where: { token: params.token },
+      include: {
+        room: {
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            passwordHash: true,
+            isDeleted: true
+          }
+        }
+      }
+    });
+
+    if (!invite || invite.room.isDeleted || invite.isRevoked || (invite.expiresAt && invite.expiresAt < new Date())) {
+      throw new AppError('Invite is invalid or expired', 400, 'BAD_REQUEST');
+    }
+
+    return sendSuccess(reply, {
+      roomId: invite.roomId,
+      roomName: invite.room.name,
+      roomDescription: invite.room.description,
+      hasPassword: Boolean(invite.room.passwordHash),
+      role: invite.role,
+    }, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.get('/api/v1/rooms/lookup/:roomId', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
+
+    const isUuid = params.roomId.length === 36 && params.roomId.includes('-');
+    const room = await prisma.room.findFirst({
+      where: {
+        OR: [
+          isUuid ? { id: params.roomId } : undefined,
+          { slug: params.roomId }
+        ].filter(Boolean) as any,
+        isDeleted: false
+      }
+    });
+
+    if (!room) throw new AppError('Room not found', 404, 'NOT_FOUND');
+
+    let membershipStatus: 'not_member' | 'member' | 'pending_approval' = 'not_member';
+    
+    const memberRecord = await prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: room.id, userId: auth.userId } }
+    });
+
+    if (memberRecord) {
+      membershipStatus = 'member';
+    } else {
+      const pendingRequest = await prisma.joinRequest.findFirst({
+        where: { roomId: room.id, userId: auth.userId, status: 'pending' }
+      });
+      if (pendingRequest) {
+        membershipStatus = 'pending_approval';
+      }
+    }
+
+    return sendSuccess(reply, {
+      roomId: room.id,
+      name: room.name,
+      description: room.description,
+      hasPassword: Boolean(room.passwordHash),
+      isApprovalRequired: room.isApprovalRequired,
+      membershipStatus,
+    }, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.post('/api/v1/rooms/:roomId/join-direct', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
+    const body = z.object({ password: z.string().optional() }).parse(request.body);
+
+    const isUuid = params.roomId.length === 36 && params.roomId.includes('-');
+    const room = await prisma.room.findFirst({
+      where: {
+        OR: [
+          isUuid ? { id: params.roomId } : undefined,
+          { slug: params.roomId }
+        ].filter(Boolean) as any,
+        isDeleted: false
+      }
+    });
+
+    if (!room) throw new AppError('Room not found', 404, 'NOT_FOUND');
+
+    if (room.passwordHash) {
+      if (!body.password || !(await bcrypt.compare(body.password, room.passwordHash))) {
+        throw new AppError('Room password is required or invalid', 403, 'FORBIDDEN');
+      }
+    }
+
+    const existingMember = await prisma.roomMember.findUnique({
+      where: { roomId_userId: { roomId: room.id, userId: auth.userId } }
+    });
+
+    if (existingMember) {
+      return sendSuccess(reply, { roomId: room.id, status: 'approved' }, 200, buildRequestMeta(request, 'v1'));
+    }
+
+    if (room.isApprovalRequired) {
+      const joinRequest = await prisma.joinRequest.upsert({
+        where: { roomId_userId: { roomId: room.id, userId: auth.userId } },
+        update: { status: 'pending' },
+        create: { roomId: room.id, userId: auth.userId, status: 'pending' }
+      });
+
+      const userDetails = await prisma.user.findUnique({
+        where: { id: auth.userId },
+        select: { displayName: true, email: true }
+      });
+
+      broadcastToRoom(room.id, 'JOIN_REQUEST_CREATED', {
+        id: joinRequest.id,
+        roomId: room.id,
+        userId: auth.userId,
+        status: 'pending',
+        createdAt: joinRequest.createdAt.toISOString(),
+        user: { displayName: userDetails?.displayName, email: userDetails?.email }
+      });
+
+      return sendSuccess(reply, { roomId: room.id, status: 'pending' }, 200, buildRequestMeta(request, 'v1'));
+    }
+
+    const member = await prisma.roomMember.upsert({
+      where: { roomId_userId: { roomId: room.id, userId: auth.userId } },
+      update: {},
+      create: { roomId: room.id, userId: auth.userId, role: 'viewer' },
+    });
+
+    const user = await prisma.user.findUnique({
+      where: { id: auth.userId },
+      select: { displayName: true, email: true }
+    });
+
+    await prisma.activityLog.create({
+      data: {
+        roomId: room.id,
+        actorId: auth.userId,
+        action: 'join_room',
+        targetType: 'room',
+        targetId: room.id,
+        metadata: { name: room.name },
+      },
+    });
+
+    broadcastToRoom(room.id, 'MEMBER_JOINED', {
+      id: member.id,
+      roomId: member.roomId,
+      userId: member.userId,
+      role: member.role,
+      joinedAt: member.joinedAt.toISOString(),
+      user: { displayName: user?.displayName, email: user?.email },
+    });
+
+    return sendSuccess(reply, { roomId: room.id, status: 'approved' }, 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.get('/api/v1/rooms/:roomId/approvals', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = roomIdParamsSchema.parse(request.params);
+    await requireRoomRole(auth.userId, params.roomId, 'editor');
+
+    const requests = await prisma.joinRequest.findMany({
+      where: { roomId: params.roomId, status: 'pending' },
+      include: {
+        user: {
+          select: { displayName: true, email: true }
+        }
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    return sendSuccess(reply, requests.map(r => ({
+      id: r.id,
+      roomId: r.roomId,
+      userId: r.userId,
+      status: r.status,
+      createdAt: r.createdAt.toISOString(),
+      user: { displayName: r.user.displayName, email: r.user.email }
+    })), 200, buildRequestMeta(request, 'v1'));
+  });
+
+  app.post('/api/v1/rooms/:roomId/approvals/:requestId/action', async (request, reply) => {
+    const auth = await authenticateRequest(request, options.env);
+    const params = z.object({ roomId: z.string().uuid(), requestId: z.string().uuid() }).parse(request.params);
+    const body = z.object({ action: z.enum(['approve', 'decline']) }).parse(request.body);
+
+    await requireRoomRole(auth.userId, params.roomId, 'admin');
+
+    const joinRequest = await prisma.joinRequest.findUnique({
+      where: { id: params.requestId },
+      include: { user: true, room: true }
+    });
+
+    if (!joinRequest || joinRequest.roomId !== params.roomId) {
+      throw new AppError('Join request not found', 404, 'NOT_FOUND');
+    }
+
+    if (body.action === 'approve') {
+      await prisma.joinRequest.update({
+        where: { id: params.requestId },
+        data: { status: 'approved' }
+      });
+
+      const member = await prisma.roomMember.upsert({
+        where: { roomId_userId: { roomId: params.roomId, userId: joinRequest.userId } },
+        update: {},
+        create: { roomId: params.roomId, userId: joinRequest.userId, role: 'viewer' }
+      });
+
+      await prisma.activityLog.create({
+        data: {
+          roomId: params.roomId,
+          actorId: joinRequest.userId,
+          action: 'join_room',
+          targetType: 'room',
+          targetId: params.roomId,
+          metadata: { name: joinRequest.room.name },
+        },
+      });
+
+      broadcastToRoom(params.roomId, 'MEMBER_JOINED', {
+        id: member.id,
+        roomId: member.roomId,
+        userId: member.userId,
+        role: member.role,
+        joinedAt: member.joinedAt.toISOString(),
+        user: { displayName: joinRequest.user.displayName, email: joinRequest.user.email },
+      });
+
+      broadcastToRoom(params.roomId, 'JOIN_REQUEST_UPDATED', {
+        id: joinRequest.id,
+        status: 'approved',
+        userId: joinRequest.userId
+      });
+    } else {
+      await prisma.joinRequest.update({
+        where: { id: params.requestId },
+        data: { status: 'declined' }
+      });
+
+      broadcastToRoom(params.roomId, 'JOIN_REQUEST_UPDATED', {
+        id: joinRequest.id,
+        status: 'declined',
+        userId: joinRequest.userId
+      });
+    }
+
     return sendSuccess(reply, null, 200, buildRequestMeta(request, 'v1'));
   });
 
@@ -391,7 +685,7 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
 
     const invite = await prisma.inviteLink.findFirst({
       where: { roomId: body.roomId, token: body.token },
-      include: { room: { select: { id: true, passwordHash: true, isDeleted: true } } },
+      include: { room: { select: { id: true, name: true, passwordHash: true, isDeleted: true } } },
     });
 
     if (!invite || invite.room.isDeleted || invite.isRevoked || (invite.expiresAt && invite.expiresAt < new Date())) {
@@ -404,7 +698,7 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
       }
     }
 
-    await prisma.roomMember.upsert({
+    const member = await prisma.roomMember.upsert({
       where: { roomId_userId: { roomId: invite.roomId, userId: auth.userId } },
       update: { role: invite.role },
       create: { roomId: invite.roomId, userId: auth.userId, role: invite.role },
@@ -421,6 +715,28 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
 
     if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 
+    // Create the activity log entry
+    await prisma.activityLog.create({
+      data: {
+        roomId: invite.roomId,
+        actorId: auth.userId,
+        action: 'join_room',
+        targetType: 'room',
+        targetId: invite.roomId,
+        metadata: { name: invite.room.name },
+      },
+    });
+
+    // Broadcast member joined
+    broadcastToRoom(invite.roomId, 'MEMBER_JOINED', {
+      id: member.id,
+      roomId: member.roomId,
+      userId: member.userId,
+      role: member.role,
+      joinedAt: member.joinedAt.toISOString(),
+      user: { displayName: user.displayName, email: user.email },
+    });
+
     return sendSuccess(reply, { user: {
       id: user.id,
       email: user.email,
@@ -431,6 +747,7 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
       updatedAt: user.updatedAt.toISOString(),
     }, accessToken: (request.headers.authorization ?? '').replace(/^Bearer\s+/i, '') }, 200, buildRequestMeta(request, 'v1'));
   });
+
 
   app.get('/api/v1/rooms/:roomId/content', async (request, reply) => {
     const auth = await authenticateRequest(request, options.env);
@@ -453,9 +770,10 @@ export async function registerRoomRoutes(app: FastifyInstance, options: RoomRout
   });
 
   app.post('/api/v1/rooms/:roomId/content/presign', async (request, reply) => {
-    await authenticateRequest(request, options.env);
+    const auth = await authenticateRequest(request, options.env);
     const params = roomIdParamsSchema.parse(request.params);
     const body = presignedUrlSchema.parse(request.body);
+    await requireRoomRole(auth.userId, params.roomId, 'editor');
 
     const uploadId = randomBytes(16).toString('hex');
     const presignedUrl = `${options.env.APP_URL}/api/v1/uploads?roomId=${params.roomId}&uploadId=${uploadId}&filename=${encodeURIComponent(body.filename)}`;

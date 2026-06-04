@@ -1,10 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
 import { authService } from '../services/authService';
-import { useAuthStore } from '../store';
+import { useAuthStore, useUIStore } from '../store';
+import nexusLogo from '../nexus_logo.jpeg';
 
 function Sidebar(): JSX.Element {
   const location = useLocation();
   const { clearAuth } = useAuthStore();
+  const { sidebarOpen } = useUIStore();
 
   const isActive = (path: string): boolean => location.pathname === path;
 
@@ -16,12 +18,16 @@ function Sidebar(): JSX.Element {
   };
 
   return (
-    <aside className="w-64 bg-card text-card-foreground border-r border-border flex flex-col transition-colors duration-300">
+    <aside className={`fixed inset-y-0 left-0 z-45 w-64 bg-card text-card-foreground border-r border-border flex flex-col transition-all duration-300 md:static md:translate-x-0 ${
+      sidebarOpen ? 'translate-x-0' : '-translate-x-full md:hidden'
+    }`}>
       {/* Logo */}
       <div className="px-6 py-6 border-b border-border flex items-center gap-3">
-        <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-primary to-indigo-400 flex items-center justify-center text-primary-foreground font-bold shadow-md shadow-primary/20">
-          N
-        </div>
+        <img 
+          src={nexusLogo} 
+          alt="Nexus Logo" 
+          className="w-9 h-9 rounded-xl object-cover shadow-md shadow-primary/20"
+        />
         <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-primary to-indigo-500 bg-clip-text text-transparent">
           Nexus Rooms
         </h1>

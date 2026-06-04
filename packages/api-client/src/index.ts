@@ -274,6 +274,51 @@ class ApiClient {
     }, responseSchemas.auth).then((response) => response.data);
   }
 
+  async getInviteDetails(token: string): Promise<Types.InviteDetails> {
+    z.string().min(1).parse(token);
+
+    return this.request(`/api/v1/invites/${token}`, {
+      method: 'GET',
+    }, responseSchemas.inviteDetails).then((response) => response.data);
+  }
+
+  async joinRoomDirect(roomId: string, password?: string): Promise<Types.JoinDirectResponse> {
+    z.string().min(1).parse(roomId);
+    const payload = z.object({ password: z.string().optional() }).parse({ password });
+
+    return this.request(`/api/v1/rooms/${roomId}/join-direct`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.joinDirect).then((response) => response.data);
+  }
+
+  async lookupRoom(roomId: string): Promise<Types.RoomLookupDetails> {
+    z.string().min(1).parse(roomId);
+
+    return this.request(`/api/v1/rooms/lookup/${roomId}`, {
+      method: 'GET',
+    }, responseSchemas.roomLookup).then((response) => response.data);
+  }
+
+  async getPendingJoinRequests(roomId: string): Promise<Types.JoinRequest[]> {
+    z.string().uuid().parse(roomId);
+
+    return this.request(`/api/v1/rooms/${roomId}/approvals`, {
+      method: 'GET',
+    }, responseSchemas.joinRequests).then((response) => response.data);
+  }
+
+  async handleJoinRequestAction(roomId: string, requestId: string, action: 'approve' | 'decline'): Promise<void> {
+    z.string().uuid().parse(roomId);
+    z.string().uuid().parse(requestId);
+    const payload = z.object({ action: z.enum(['approve', 'decline']) }).parse({ action });
+
+    await this.request(`/api/v1/rooms/${roomId}/approvals/${requestId}/action`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, responseSchemas.empty);
+  }
+
   // Content
   async getContent(roomId: string): Promise<Types.PaginatedResponse<Types.ContentItem>> {
     z.string().uuid().parse(roomId);

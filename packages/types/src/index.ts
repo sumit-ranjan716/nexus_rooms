@@ -172,6 +172,7 @@ export interface CreateRoomRequest {
   name: string;
   description?: string;
   password?: string;
+  isApprovalRequired?: boolean;
 }
 
 export interface UpdateRoomRequest {
@@ -313,5 +314,43 @@ export interface ActivityLog {
   targetId: string | null;
   metadata?: unknown;
   createdAt: string;
+}
+
+// Invite details response type
+export interface InviteDetails {
+  roomId: string;
+  roomName: string;
+  roomDescription: string | null;
+  hasPassword: boolean;
+  role: RoomRole;
+}
+
+// Join direct response type
+export interface JoinDirectResponse {
+  roomId: string;
+  status: 'approved' | 'pending';
+}
+
+// Room lookup details
+export interface RoomLookupDetails {
+  roomId: string;
+  name: string;
+  description: string | null;
+  hasPassword: boolean;
+  isApprovalRequired: boolean;
+  membershipStatus: 'not_member' | 'member' | 'pending_approval';
+}
+
+// Join request details
+export interface JoinRequest {
+  id: string;
+  roomId: string;
+  userId: string;
+  status: string;
+  createdAt: string;
+  user?: {
+    displayName: string | null;
+    email: string;
+  };
 }
 

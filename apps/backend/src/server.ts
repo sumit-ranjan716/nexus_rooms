@@ -95,15 +95,26 @@ async function start(): Promise<void> {
   app.setErrorHandler((error, request, reply) => {
     const appError = normalizeError(error);
 
-    request.log.error(
-      {
-        requestId: request.id,
-        err: error,
-        statusCode: appError.statusCode,
-        code: appError.code,
-      },
-      'request failed'
-    );
+    if (appError.statusCode >= 500) {
+      request.log.error(
+        {
+          requestId: request.id,
+          err: error,
+          statusCode: appError.statusCode,
+          code: appError.code,
+        },
+        'request failed'
+      );
+    } else {
+      request.log.warn(
+        {
+          requestId: request.id,
+          err: { message: error.message, code: appError.code },
+          statusCode: appError.statusCode,
+        },
+        'client request warning'
+      );
+    }
 
     sendError(reply, appError, request.id);
   });
